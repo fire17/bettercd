@@ -10,6 +10,7 @@ case "$BETTERCD_SH" in /*) ;; *) BETTERCD_SH="$PWD/$BETTERCD_SH" ;; esac
 
 TMP="$(mktemp -d)" || exit 1
 HOME="$TMP/home"; export HOME
+XDG_CONFIG_HOME="$HOME/.config"; export XDG_CONFIG_HOME  # CI runners set this globally
 mkdir -p "$HOME"
 unset CDPATH
 cd "$TMP" || exit 1
