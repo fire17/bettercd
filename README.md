@@ -114,6 +114,8 @@ Remove the `# >>> bettercd >>>` block (or the `source … bettercd.sh` line) fro
 
 **Does it slow down my shell?** ~25µs per cd, nothing at startup, no daemons, no hooks beyond the function itself.
 
+**zoxide's doctor complains that it isn't last in my rc?** It would — bettercd deliberately wraps zoxide's `cd` (and delegates to it faithfully), which is exactly what zoxide's heuristic flags. bettercd silences that one false positive by setting `_ZO_DOCTOR=0` in zoxide mode, unless you've set it yourself.
+
 **What shells?** bash and zsh (macOS, Linux, WSL, Git Bash). The core is POSIX-clean and loads under dash. fish and PowerShell are on the roadmap.
 
 **What about muscle memory on servers without it?** Fair warning: you may come to expect `cd` to create. On bare machines it just fails like it always did — nothing breaks, you just miss it.

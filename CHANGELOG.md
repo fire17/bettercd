@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.1 — 2026-07-06
+
+- Silence zoxide's doctor false positive: zoxide ≥0.9.7 warns when anything
+  redefines `cd` after `zoxide init` — bettercd does so deliberately and
+  delegates faithfully, so it sets `_ZO_DOCTOR=0` in zoxide mode (only if the
+  user hasn't set it themselves).
+- Tests: pin `XDG_CONFIG_HOME` into the sandbox (CI runners set it globally).
+
 ## v0.1.0 — 2026-07-06
 
 Initial release.

@@ -13,7 +13,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.1.0"
+BETTERCD_VERSION="0.1.1"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -46,6 +46,14 @@ __bettercd_detect() {
     unset _bcd_body
 }
 __bettercd_detect
+
+# zoxide's own doctor warns whenever anything redefines cd after `zoxide init`.
+# That is exactly what bettercd does — deliberately, delegating faithfully to
+# __zoxide_z — so silence that one false positive (unless the user set it).
+if [ "$_BETTERCD_MODE" = "zoxide" ] && [ -z "${_ZO_DOCTOR+x}" ]; then
+    _ZO_DOCTOR=0
+    export _ZO_DOCTOR
+fi
 
 # --- helpers -----------------------------------------------------------------
 
