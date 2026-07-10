@@ -1879,7 +1879,12 @@ cd() {
     # outside the current directory → fail once with a hint; on an immediate
     # identical retry, ask for confirmation (interactive shells only)
     if [ "$_BETTERCD_LAST_MISS" = "$_bcd_norm" ] && __bettercd_interactive; then
-        printf 'bettercd: create %s ? [y/N] ' "$_bcd_norm" >&2
+        if __bettercd_tty_ok; then
+            printf '\033[38;5;213m✻\033[0m \033[2mcreate\033[0m \033[1;36m%s\033[0m \033[2m?\033[0m \033[1m[y/N]\033[0m ' \
+                "$(__bettercd_home_rel "$_bcd_norm")" >&2
+        else
+            printf 'bettercd: create %s ? [y/N] ' "$_bcd_norm" >&2
+        fi
         read -r _bcd_ans
         case "$_bcd_ans" in
             y|Y|yes|YES)
@@ -1887,14 +1892,24 @@ cd() {
                 return $? ;;
             *)
                 __bettercd_clear_miss
-                printf 'bettercd: not created.\n' >&2
+                if __bettercd_tty_ok; then
+                    printf '\033[38;5;213m✻\033[0m \033[2mnot created\033[0m\n' >&2
+                else
+                    printf 'bettercd: not created.\n' >&2
+                fi
                 return 1 ;;
         esac
     fi
     _BETTERCD_LAST_MISS="$_bcd_norm"
-    printf 'cd: no such file or directory: %s\n' "$1" >&2
-    if __bettercd_interactive && [ "${BETTERCD_QUIET-0}" != 1 ]; then
-        printf 'bettercd: outside the current dir — repeat the command to create it.\n' >&2
+    if __bettercd_interactive && [ "${BETTERCD_QUIET-0}" != 1 ] && __bettercd_tty_ok; then
+        # one in-brand line instead of the raw two-line error
+        printf '\033[38;5;213m✻\033[0m \033[1;36m%s\033[0m \033[2mdoesn'"'"'t exist — outside your current dir · repeat to create it\033[0m\n' \
+            "$(__bettercd_home_rel "$_bcd_norm")" >&2
+    else
+        printf 'cd: no such file or directory: %s\n' "$1" >&2
+        if __bettercd_interactive && [ "${BETTERCD_QUIET-0}" != 1 ]; then
+            printf 'bettercd: outside the current dir — repeat the command to create it.\n' >&2
+        fi
     fi
     return 1
 }

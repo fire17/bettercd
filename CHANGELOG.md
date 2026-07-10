@@ -2,6 +2,10 @@
 
 ## Unreleased (v0.12.0)
 
+- Outside-cwd flow restyled in-brand: one ✻ line (cyan path, dim prose)
+  replaces the raw two-line error; styled [y/N] prompt; scripts/non-tty keep
+  the exact previous plain text.
+
 - **The dropdown is now a places workbench.** The `cd --` menu grew a full,
   blazingly-fast row model — every expensive fact (git status, tags, mtime) is
   computed only for rows you actually look at, once, then cached as pure string
