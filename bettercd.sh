@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.4.0"
+BETTERCD_VERSION="0.5.0"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -581,6 +581,20 @@ elif [ -n "${BASH_VERSION-}" ]; then
                *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__bettercd_anim_precmd" ;;
            esac ;;
     esac
+fi
+
+# --- cd-typos: cd.. and friends ------------------------------------------------
+# `cd..` is its own command WORD, so the cd function never sees it. Plain
+# aliases translate the classic dot-typos (each extra dot = one more level).
+# Why not a command-not-found hook: shells run that handler in a SUBSHELL, so
+# its cd can never move the parent — verified live; aliases are what works.
+# BETTERCD_CD_TYPOS=0 before sourcing disables. (bash scripts are unaffected
+# either way: non-interactive bash never expands aliases.)
+if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ] && [ "${BETTERCD_CD_TYPOS-1}" != 0 ]; then
+    alias cd..='cd ..'
+    alias cd...='cd ../..'
+    alias cd....='cd ../../..'
+    alias cd.....='cd ../../../..'
 fi
 
 # --- the bettercd command ----------------------------------------------------

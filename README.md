@@ -70,6 +70,7 @@ flowchart LR
 - **`cd some/file.txt` → jumps to the file's parent directory** instead of erroring.
 - **`bettercd doctor`** — checks zoxide is installed and working, whether it owns `cd`, whether fuzzy interactive search (fzf) is available, and that bettercd is loaded in the right order. `--fix` backs up your setup first, then offers to install what's missing.
 - **`bettercd backup`** — snapshots your current cd paradigm (your `cd` function, aliases, rc files, zoxide database) plus a `RESTORE.md` with exact steps to return to it.
+- **`cd..` just works** — the classic no-space typo: `cd..` → `cd ..`, `cd...` → `cd ../..`, up to `cd.....`. (`BETTERCD_CD_TYPOS=0` to disable.)
 - Flags (`cd -P`), `cd -`, `CDPATH`, dir-stack (`cd +2`), custom `cd` functions: all preserved and passed through.
 
 ## Install
@@ -148,6 +149,7 @@ BETTERCD_QUIET=1          suppress hints
 BETTERCD_TYPO_GUARD=0     disable the did-you-mean typo guard
 BETTERCD_SPARKLE=0        disable the animated create line
 BETTERCD_HISTORY_HINT=0   don't push undo-cd into history after a create
+BETTERCD_CD_TYPOS=0       don't alias cd.. / cd... typos (set before sourcing)
 BETTERCD_SPARKLE_GLYPHS   space-separated glyph frames  (default: ✢ ✳ ✶ ✻ ✽ ✻ ✶ ✳)
 BETTERCD_SPARKLE_COLORS   space-separated 256-color codes (default: 213 219 177 225)
 ```

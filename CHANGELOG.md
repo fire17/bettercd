@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.5.0 — 2026-07-10
+
+- `cd..` typo aliases: `cd..` → `cd ..`, `cd...` → `cd ../..`, up to `cd.....`
+  (each extra dot = one more level). Aliases, not a command-not-found hook —
+  shells run that handler in a subshell where cd can't move the parent
+  (verified live before choosing). bash scripts unaffected (non-interactive
+  bash never expands aliases). `BETTERCD_CD_TYPOS=0` before sourcing disables.
+
+
 ## v0.4.0 — 2026-07-10
 
 - ↑ history hint: after a create, a synthetic `undo-cd` is pushed into the

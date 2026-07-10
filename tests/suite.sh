@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC2181,SC2217,SC2034
+# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC2181,SC2217,SC2034,SC3044
 #   cd failing, inspecting $? after it, and feeding its [y/N] prompt via stdin
 #   are exactly what this suite tests.
 # bettercd test suite — pure POSIX sh, runs under bash and zsh.
@@ -272,6 +272,23 @@ cd "$TMP"
 
 [ "$(__bettercd_nth 'a b c' 0)" = a ] && [ "$(__bettercd_nth 'a b c' 4)" = b ]
 check "sparkle theming: nth wraps frames" $?
+
+# 23. cd-typo aliases (cd.. / cd...) — eval forces a fresh parse so the
+# alias (defined after this file began parsing) is active; bash also needs
+# expand_aliases in non-interactive shells
+if [ -n "${BASH_VERSION-}" ]; then shopt -s expand_aliases 2>/dev/null; fi
+if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
+    mkdir -p "$TMP/cnf/a/b" && cd "$TMP/cnf/a/b"
+    eval 'cd..' 2>/dev/null
+    [ "$PWD" = "$TMP/cnf/a" ]; check "cd.. goes up one" $?
+    cd "$TMP/cnf/a/b"
+    eval 'cd...' 2>/dev/null
+    [ "$PWD" = "$TMP/cnf" ]; check "cd... goes up two" $?
+    cd "$TMP/cnf/a/b"
+    eval 'cd....' 2>/dev/null
+    [ "$PWD" = "$TMP" ]; check "cd.... goes up three" $?
+    cd "$TMP"
+fi
 
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
