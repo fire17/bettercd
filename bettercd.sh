@@ -1,8 +1,9 @@
 #!/bin/sh
-# shellcheck disable=SC3044,SC3054,SC2154,SC2164,SC2016
+# shellcheck disable=SC3044,SC3054,SC2154,SC2164,SC2016,SC2059
 #   SC3044/SC3054/SC2154: declare/functions[] are bash/zsh-only and always
 #   guarded by $BASH_VERSION/$ZSH_VERSION checks. SC2164: one-line cd
 #   delegates propagate their exit status by design. SC2016: literal hints.
+#   SC2059: color vars in printf formats are ours, never user input.
 # bettercd — a better cd: zoxide-aware, auto-mkdir, with undo.
 # https://github.com/fire17/bettercd
 #
@@ -13,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.2.1"
+BETTERCD_VERSION="0.2.2"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -411,26 +412,37 @@ bettercd() {
 }
 
 __bettercd_help() {
-    cat <<'__BCD_EOF__'
-bettercd — a better cd: zoxide-aware, auto-mkdir, with undo.
-
-  cd <existing>        plain cd (zoxide-aware, zero overhead)
-  cd <missing>         under cwd → mkdir -p + cd (with undo hint)
-                       elsewhere → fails once; repeat → [y/N] create prompt
-  cd <missing>/        trailing slash: always create (skips fuzzy jump)
-  cd <file>            jumps to the file's parent directory
-
-  bettercd undo        go back + remove the dirs the last cd created (rmdir only)
-  undo-cd              same as `bettercd undo` (what the create line suggests)
-  bettercd doctor      check zoxide / fzf / cd-ownership; --fix to install
-  bettercd backup      snapshot your current cd paradigm + how to restore it
-  bettercd status      show mode, pending undo, version
-  bettercd version     print version
-
-  env: BETTERCD_AUTO_CREATE=0  disable auto-create
-       BETTERCD_QUIET=1        suppress hints
-       BETTERCD_SPARKLE=0      disable the animated create line
-__BCD_EOF__
+    # colors only on a tty, honoring NO_COLOR; plain text everywhere else
+    if [ -t 1 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+        _bh_T='\033[1;33m' _bh_S='\033[1;34m' _bh_C='\033[1;36m' _bh_G='\033[32m' _bh_D='\033[2m' _bh_R='\033[0m'
+    else
+        _bh_T='' _bh_S='' _bh_C='' _bh_G='' _bh_D='' _bh_R=''
+    fi
+    printf "\n  ${_bh_T}✻ bettercd ${BETTERCD_VERSION}${_bh_R} ${_bh_D}— a better cd: zoxide-aware, auto-mkdir, with undo${_bh_R}\n\n"
+    printf "  ${_bh_S}USAGE${_bh_R}\n"
+    printf "    ${_bh_C}%-22s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
+        "cd <existing>"  "plain cd (zoxide-aware, ~25µs, zero magic)" \
+        "cd <missing>"   "under cwd → mkdir -p + cd, ✻ sparkle + undo hint" \
+        ""               "elsewhere → fails once; repeat → [y/N] create" \
+        "cd <missing>/"  "trailing slash: always create (skips fuzzy jump)" \
+        "cd <file>"      "jump to the file's parent directory"
+    printf "\n  ${_bh_S}COMMANDS${_bh_R}\n"
+    printf "    ${_bh_C}%-22s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
+        "undo-cd"          "go back + remove what the last cd created" \
+        "bettercd undo"    "same thing, spelled out (rmdir-only, never rm)" \
+        "bettercd doctor"  "check zoxide / fzf / load order (--fix installs)" \
+        "bettercd backup"  "snapshot your cd paradigm + RESTORE.md" \
+        "bettercd status"  "mode, pending undo, version" \
+        "cdi <query>"      "interactive fuzzy cd (zoxide + fzf)"
+    printf "\n  ${_bh_S}ENV${_bh_R}\n"
+    printf "    ${_bh_C}%-25s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
+        "BETTERCD_AUTO_CREATE=0" "disable auto-create" \
+        "BETTERCD_QUIET=1"       "suppress hints" \
+        "BETTERCD_SPARKLE=0"     "disable the animated create line"
+    printf "\n  ${_bh_S}EXAMPLE${_bh_R}\n"
+    printf "    ${_bh_G}\$ cd projects/newapp/src${_bh_R}       ${_bh_D}# doesn't exist yet — now it does, you're in it${_bh_R}\n"
+    printf "    ${_bh_G}\$ undo-cd${_bh_R}                      ${_bh_D}# changed your mind — back + cleaned up${_bh_R}\n"
+    printf "\n  ${_bh_D}https://github.com/fire17/bettercd${_bh_R}\n\n"
 }
 
 __bettercd_undo() {

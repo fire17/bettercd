@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.2 — 2026-07-10
+
+- Beautiful `bettercd help`: colorized, sectioned (USAGE / COMMANDS / ENV /
+  EXAMPLE), tty-only colors honoring NO_COLOR; plain text in scripts/pipes.
+
+
 ## v0.2.1 — 2026-07-10
 
 - Fix: sourcing under bash-in-posix-mode `sh` (e.g. macOS `/bin/sh`) failed —
