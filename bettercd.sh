@@ -124,6 +124,8 @@ elif [ -n "${BASH_VERSION-}" ]; then
         *) _BETTERCD_SRC="$(cd "$(dirname "$_BETTERCD_SRC")" 2>/dev/null && pwd)/${_BETTERCD_SRC##*/}" ;;
     esac
 fi
+[ -n "${ZSH_VERSION-}" ] && eval 'zmodload zsh/datetime 2>/dev/null'
+command mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/bettercd" 2>/dev/null
 _BETTERCD_STAMP="${XDG_CONFIG_HOME:-$HOME/.config}/bettercd/.loaded"
 if [ -n "$_BETTERCD_SRC" ] && [ -f "$_BETTERCD_SRC" ]; then
     command mkdir -p "${_BETTERCD_STAMP%/*}" 2>/dev/null
@@ -440,6 +442,15 @@ __bettercd_anim_precmd() {
     # pushd, autocd. Hot path, so pure string ops, zero forks, no dedup/cap
     # here; the menu dedups + drops $PWD + caps at 8 lazily when it opens.
     if [ "$PWD" != "${_BETTERCD_LASTPWD-}" ]; then
+        # visit stamp (for the dropdown's "visited" column): epoch via builtin
+        # where the shell has one (zsh zsh/datetime EPOCHSECONDS, bash>=5);
+        # else one date fork — only ever on a DIRECTORY CHANGE, never a prompt
+        # shellcheck disable=SC3028  # EPOCHSECONDS: zsh(datetime)/bash5 builtin; empty elsewhere
+        _bcd_vnow="${EPOCHSECONDS-}"
+        [ -n "$_bcd_vnow" ] || _bcd_vnow="$(date +%s 2>/dev/null)"
+        case "$_bcd_vnow" in *[!0-9]*|'') ;; *)
+            printf '%s %s\n' "$_bcd_vnow" "$PWD" >> "${XDG_CONFIG_HOME:-$HOME/.config}/bettercd/visits" 2>/dev/null
+        esac
         # remember this dir's inode while it still exists — inodes survive
         # same-filesystem renames/moves, which is what lets a later miss say
         # "moved, and here's where" instead of a bare error. `ls -di` is the
@@ -809,28 +820,113 @@ __BCD_EOF__
 
 # Detail cache (table view only): "<mtime> <ver> <ship>\t<path>". Computed only
 # when a row is drawn in detail mode, so compact mode never pays for tags/mtime.
-__bettercd_meta_d() { # $1 dir → ensures _BETTERCD_D; sets _bcd_d_mt _bcd_d_ver _bcd_d_ship
+# "3m" / "2h" / "5d" ago — pure arithmetic
+__bettercd_ago() { # $1 epoch-then, $2 epoch-now → sets _bcd_ago
+    _bcd_agd=$(( $2 - $1 ))
+    if   [ "$_bcd_agd" -lt 60 ];     then _bcd_ago="now"
+    elif [ "$_bcd_agd" -lt 3600 ];   then _bcd_ago="$(( _bcd_agd / 60 ))m"
+    elif [ "$_bcd_agd" -lt 86400 ];  then _bcd_ago="$(( _bcd_agd / 3600 ))h"
+    elif [ "$_bcd_agd" -lt 2592000 ]; then _bcd_ago="$(( _bcd_agd / 86400 ))d"
+    else _bcd_ago="$(( _bcd_agd / 2592000 ))mo"; fi
+}
+
+# load the visits file ONCE per menu open: newest epoch per path; compacts
+# the file when it grows past ~600 lines (one awk, only then)
+__bettercd_visits_load() {
+    _BETTERCD_V=""
+    _bcd_vf="${XDG_CONFIG_HOME:-$HOME/.config}/bettercd/visits"
+    [ -f "$_bcd_vf" ] || return 0
+    _BETTERCD_V="$(LC_ALL=C awk '{e[$2]=$1} END{for (d in e) print e[d], d}' "$_bcd_vf" 2>/dev/null)"
+    _bcd_vln=0
+    while IFS= read -r _bcd_vl; do [ -n "$_bcd_vl" ] && _bcd_vln=$((_bcd_vln + 1)); done < "$_bcd_vf"
+    if [ "$_bcd_vln" -gt 600 ]; then
+        printf '%s\n' "$_BETTERCD_V" > "$_bcd_vf.tmp" 2>/dev/null && command mv -f "$_bcd_vf.tmp" "$_bcd_vf" 2>/dev/null
+    fi
+    return 0
+}
+__bettercd_visited() { # $1 dir → sets _bcd_vis ("3h" or "-")
+    _bcd_vis="-"
+    [ -n "${_BETTERCD_V-}" ] || return 0
+    while IFS= read -r _bcd_vl; do
+        case "$_bcd_vl" in
+            *" $1")
+                # shellcheck disable=SC3028  # guarded fallback below
+                _bcd_vnow2="${EPOCHSECONDS:-$_BETTERCD_MENU_NOW}"
+                __bettercd_ago "${_bcd_vl%% *}" "$_bcd_vnow2"
+                _bcd_vis="$_bcd_ago"
+                return 0 ;;
+        esac
+    done <<__BCD_EOF__
+$_BETTERCD_V
+__BCD_EOF__
+    return 0
+}
+
+# dir birthtime, portable probe decided once: BSD stat -f %SB, GNU stat -c %w
+__bettercd_created() { # $1 dir → sets _bcd_crt (YYYY-MM-DD or "-")
+    if [ -z "${_BETTERCD_STATF-}" ]; then
+        if command stat -f '%SB' -t '%Y-%m-%d' "$HOME" >/dev/null 2>&1; then _BETTERCD_STATF=bsd
+        elif command stat -c '%w' "$HOME" >/dev/null 2>&1; then _BETTERCD_STATF=gnu
+        else _BETTERCD_STATF=none; fi
+    fi
+    case "$_BETTERCD_STATF" in
+        bsd) _bcd_crt="$(command stat -f '%SB' -t '%Y-%m-%d' "$1" 2>/dev/null)" ;;
+        gnu) _bcd_crt="$(command stat -c '%w' "$1" 2>/dev/null)"; _bcd_crt="${_bcd_crt%% *}" ;;
+        *)   _bcd_crt="-" ;;
+    esac
+    case "$_bcd_crt" in ''|-*) _bcd_crt="-" ;; esac
+    return 0
+}
+
+__bettercd_meta_d() { # $1 dir → sets _bcd_d_mt _bcd_d_ver _bcd_d_ship _bcd_d_vis _bcd_d_crt _bcd_d_sz
     _bcd_d_want="$_BETTERCD_TAB$1"
     while IFS= read -r _bcd_d_l; do
         case "$_bcd_d_l" in
             *"$_bcd_d_want")
                 _bcd_d_f="${_bcd_d_l%%"$_BETTERCD_TAB"*}"
-                _bcd_d_mt="${_bcd_d_f%% *}"
-                _bcd_d_rest="${_bcd_d_f#* }"
-                _bcd_d_ver="${_bcd_d_rest%% *}"; _bcd_d_ship="${_bcd_d_rest##* }"
+                _bcd_d_mt="${_bcd_d_f%% *}";  _bcd_d_rest="${_bcd_d_f#* }"
+                _bcd_d_ver="${_bcd_d_rest%% *}"; _bcd_d_rest="${_bcd_d_rest#* }"
+                _bcd_d_ship="${_bcd_d_rest%% *}"; _bcd_d_rest="${_bcd_d_rest#* }"
+                _bcd_d_vis="${_bcd_d_rest%% *}"; _bcd_d_rest="${_bcd_d_rest#* }"
+                _bcd_d_crt="${_bcd_d_rest%% *}"; _bcd_d_sz="${_bcd_d_rest##* }"
                 return 0 ;;
         esac
     done <<__BCD_EOF__
-${_BETTERCD_D-}
+${_BETTERCD_D2-}
 __BCD_EOF__
     _bcd_d_mt="$(__bettercd_rowmtime "$1")"
     _bcd_d_ver="$(__bettercd_rowver "$1")"
     _bcd_d_ship="$(__bettercd_rowshipped "$1")"; [ -n "$_bcd_d_ship" ] || _bcd_d_ship="-"
-    _BETTERCD_D="${_BETTERCD_D-}$_bcd_d_mt $_bcd_d_ver $_bcd_d_ship$_BETTERCD_TAB$1
+    __bettercd_visited "$1"; _bcd_d_vis="$_bcd_vis"
+    __bettercd_created "$1"; _bcd_d_crt="$_bcd_crt"
+    _bcd_d_sz="-"
+    _BETTERCD_D2="${_BETTERCD_D2-}$_bcd_d_mt $_bcd_d_ver $_bcd_d_ship $_bcd_d_vis $_bcd_d_crt $_bcd_d_sz$_BETTERCD_TAB$1
 "
     return 0
 }
 
+
+# patch the cached size field for one path (after an on-demand `s` du)
+__bettercd_meta_szset() { # $1 dir, $2 human size
+    _bcd_sz_want="$_BETTERCD_TAB$1"
+    _bcd_sz_new=""
+    while IFS= read -r _bcd_sz_l; do
+        [ -n "$_bcd_sz_l" ] || continue
+        case "$_bcd_sz_l" in
+            *"$_bcd_sz_want")
+                _bcd_sz_f="${_bcd_sz_l%%"$_BETTERCD_TAB"*}"
+                _bcd_sz_pre="${_bcd_sz_f% *}"
+                _bcd_sz_new="$_bcd_sz_new$_bcd_sz_pre $2$_BETTERCD_TAB$1
+"  ;;
+            *) _bcd_sz_new="$_bcd_sz_new$_bcd_sz_l
+"  ;;
+        esac
+    done <<__BCD_EOF__
+${_BETTERCD_D2-}
+__BCD_EOF__
+    _BETTERCD_D2="$_bcd_sz_new"
+    return 0
+}
 # Drop a path's cached color/detail records so the next draw recomputes them —
 # used after `t` marks a dir a project (its bold/icon/version must refresh).
 __bettercd_meta_inval() { # $1 dir
@@ -852,9 +948,9 @@ __BCD_EOF__
         _bcd_mi_d="$_bcd_mi_d$_bcd_mi_l
 "
     done <<__BCD_EOF__
-${_BETTERCD_D-}
+${_BETTERCD_D2-}
 __BCD_EOF__
-    _BETTERCD_D="$_bcd_mi_d"
+    _BETTERCD_D2="$_bcd_mi_d"
 }
 
 # F7 fuzzy subsequence match — pure, fork-free, shell-agnostic. Both args must
@@ -1133,7 +1229,9 @@ __bettercd_menu_draw() {
     _bcd_dL="$_BETTERCD_CR
 "
     if [ "$_bcd_ml_table" = 1 ]; then
-        _bcd_df="${_bcd_dE}[2m    name                  modified     version    ✓${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+        _bcd_tnw=$(( _bcd_ml_cols - 58 )); [ "$_bcd_tnw" -ge 16 ] || _bcd_tnw=16
+        __bettercd_pad "name" "$_bcd_tnw"; _bcd_thn="$_bcd_pad_out"
+        _bcd_df="${_bcd_dE}[2m  $_bcd_thn visited  modified    created     version    ship  size${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     elif [ -n "$_bcd_ml_query" ]; then
         _bcd_df="${_bcd_dE}[38;5;213m⌕${_bcd_dE}[0m ${_bcd_dE}[1;36m$_bcd_ml_query${_bcd_dE}[0m ${_bcd_dE}[2m· type to filter · esc clears${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     else
@@ -1164,11 +1262,15 @@ __bettercd_menu_draw() {
             _bcd_dbold=""; [ "$_bcd_c_proj" = 1 ] && _bcd_dbold="1;"
             if [ "$_bcd_ml_table" = 1 ]; then
                 __bettercd_meta_d "$_bcd_drp"
-                _bcd_dship=" "
-                case "$_bcd_d_ship" in y) _bcd_dship="✓" ;; n) _bcd_dship="✗" ;; esac
-                __bettercd_pad "$_bcd_ddisp" 20; _bcd_dnm="$_bcd_pad_out"
+                _bcd_dship=" -  "
+                case "$_bcd_d_ship" in y) _bcd_dship=" ✓  " ;; n) _bcd_dship=" ✗  " ;; esac
+                _bcd_tnw=$(( _bcd_ml_cols - 58 )); [ "$_bcd_tnw" -ge 16 ] || _bcd_tnw=16
+                __bettercd_pad "$_bcd_ddisp" "$_bcd_tnw"; _bcd_dnm="$_bcd_pad_out"
+                __bettercd_pad "$_bcd_d_vis" 8;  _bcd_dvi="$_bcd_pad_out"
+                __bettercd_pad "$_bcd_d_mt" 11;  _bcd_dmt="$_bcd_pad_out"
+                __bettercd_pad "$_bcd_d_crt" 11; _bcd_dct="$_bcd_pad_out"
                 __bettercd_pad "$_bcd_d_ver" 10; _bcd_dvr="$_bcd_pad_out"
-                _bcd_dtext="$_bcd_dnm  $_bcd_d_mt   $_bcd_dvr $_bcd_dship"
+                _bcd_dtext="$_bcd_dnm $_bcd_dvi $_bcd_dmt $_bcd_dct $_bcd_dvr$_bcd_dship$_bcd_d_sz"
             else
                 _bcd_dtext="$_bcd_ddisp"
             fi
@@ -1210,7 +1312,7 @@ __BCD_EOF__
     [ "$_bcd_ml_table" = 1 ] && _bcd_dfoot="$_bcd_dfoot  detail"
     _bcd_df="$_bcd_df  ${_bcd_dE}[2m$_bcd_dfoot${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     _bcd_df="$_bcd_df  ${_bcd_dE}[2m$_bcd_g_pin pinned${_bcd_dE}[0m ${_bcd_dE}[38;5;40m$_bcd_g_clean clean${_bcd_dE}[0m ${_bcd_dE}[38;5;178m$_bcd_g_mod modified${_bcd_dE}[0m ${_bcd_dE}[38;5;208m$_bcd_g_untr untracked${_bcd_dE}[0m ${_bcd_dE}[1m$_bcd_g_proj project${_bcd_dE}[0m ${_bcd_dE}[2m$_bcd_g_found found · bold = .project${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
-    _bcd_df="$_bcd_df  ${_bcd_dE}[2mp pin · t mark · v table · r sort · l preset · / find · e icons · ? help · esc${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+    _bcd_df="$_bcd_df  ${_bcd_dE}[2mp pin · t mark · v table · s size · r sort · l preset · / find · e icons · ? help${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     printf '%s' "$_bcd_df" >/dev/tty
 }
 
@@ -1324,6 +1426,9 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
     _bcd_ml_table=0; _bcd_ml_full=0; _bcd_ml_fmode=0; _bcd_ml_flashrow=-1
     __bettercd_prefs_load
     __bettercd_glyphs
+    __bettercd_visits_load
+    _BETTERCD_MENU_NOW="$(date +%s 2>/dev/null)"
+    _bcd_ml_cols="${COLUMNS:-100}"
     _bcd_ml_ext=""; _bcd_ml_extq=""; _bcd_ml_act=""; _bcd_ml_pick_override=""
     _bcd_ml_darwin=0; [ "$(command uname 2>/dev/null)" = Darwin ] && _bcd_ml_darwin=1
     __bettercd_pins_load
@@ -1455,6 +1560,20 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
                             fi ;;
                         v) _bcd_ml_table=$(( 1 - _bcd_ml_table )); _bcd_ml_rebuild=1
                            __bettercd_prefs_save ;;
+                        s) # on-demand size of the selection (one du, cached)
+                            _bcd_ml_szp="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"
+                            if [ -n "$_bcd_ml_szp" ]; then
+                                _bcd_ml_szk="$(command du -sk "$_bcd_ml_szp" 2>/dev/null)"
+                                _bcd_ml_szk="${_bcd_ml_szk%%[!0-9]*}"
+                                if [ -n "$_bcd_ml_szk" ]; then
+                                    if   [ "$_bcd_ml_szk" -ge 1048576 ]; then _bcd_ml_szh="$(( _bcd_ml_szk / 1048576 ))G"
+                                    elif [ "$_bcd_ml_szk" -ge 1024 ];   then _bcd_ml_szh="$(( _bcd_ml_szk / 1024 ))M"
+                                    else _bcd_ml_szh="${_bcd_ml_szk}K"; fi
+                                    __bettercd_meta_d "$_bcd_ml_szp"
+                                    __bettercd_meta_szset "$_bcd_ml_szp" "$_bcd_ml_szh"
+                                    _bcd_ml_table=1; _bcd_ml_psel=-2
+                                fi
+                            fi ;;
                         e) # toggle unicode glyphs vs emoji (persisted)
                            if [ "${_BETTERCD_EMOJI-0}" = 1 ]; then _BETTERCD_EMOJI=0; else _BETTERCD_EMOJI=1; fi
                            __bettercd_glyphs; __bettercd_prefs_save
@@ -1509,6 +1628,12 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
         elif [ "$_bcd_ml_move" = down ] && [ "$_bcd_ml_n" -gt 0 ]; then
             _bcd_ml_sel=$(( (_bcd_ml_sel + 1) % _bcd_ml_n ))
             _bcd_ml_frame=$((_bcd_ml_frame + 1))
+        fi
+        # window resized? (COLUMNS updates after the blocking read returns,
+        # i.e. the next keypress) -> recompute widths + full redraw
+        if [ "${COLUMNS:-100}" != "$_bcd_ml_cols" ]; then
+            _bcd_ml_cols="${COLUMNS:-100}"
+            _bcd_ml_psel=-2
         fi
         [ -n "$_bcd_ml_act" ] && break
         # viewport follows the selection on KEYBOARD moves only — wheel
@@ -2176,7 +2301,7 @@ __bettercd_help() {
     printf "    ${_bh_C}%-24s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
         "↑↓ jk · wheel · hover" "move — wheel glides the list, hover grabs" \
         "⏎ / click · 1-9 · esc" "go · pick row · leave" \
-        "p · t · v · e"         "pin (persists) · mark .project/ · table view · icons↔emoji" \
+        "p · t · v · s · e"     "pin · mark .project/ · table · size-on-demand · icons↔emoji" \
         "r · l · / or type"     "sort · preset filter · blazing fuzzy find (then zoxide+disk)" \
         "u · . · o · g G · ?"   "parent · full paths · reveal · top/bottom · everything"
     printf "    ${_bh_D}glyphs: ⚑ pinned  ${_bh_R}${_bh_G}● clean${_bh_R}  ${_bh_Y}◐ modified${_bh_R}  ${_bh_O}○ untracked${_bh_R}  ${_bh_W}▪ project${_bh_R}  ${_bh_D}+ found · bold = .project${_bh_R}\n"
