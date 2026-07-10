@@ -1230,8 +1230,8 @@ __bettercd_menu_draw() {
 "
     if [ "$_bcd_ml_table" = 1 ]; then
         _bcd_tnw=$(( _bcd_ml_cols - 58 )); [ "$_bcd_tnw" -ge 16 ] || _bcd_tnw=16
-        __bettercd_pad "name" "$_bcd_tnw"; _bcd_thn="$_bcd_pad_out"
-        _bcd_df="${_bcd_dE}[2m  $_bcd_thn visited  modified    created     version    ship  size${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+        __bettercd_pad "Directory" "$_bcd_tnw"; _bcd_thn="$_bcd_pad_out"
+        _bcd_df="${_bcd_dE}[1m  $_bcd_thn visited  modified    created     version    ship  size${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     elif [ -n "$_bcd_ml_query" ]; then
         _bcd_df="${_bcd_dE}[38;5;213m⌕${_bcd_dE}[0m ${_bcd_dE}[1;36m$_bcd_ml_query${_bcd_dE}[0m ${_bcd_dE}[2m· type to filter · esc clears${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     else
