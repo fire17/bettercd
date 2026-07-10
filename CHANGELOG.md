@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.10.0 — 2026-07-10
+
+- THE BIG LIST: the dropdown now scrolls — viewport as tall as the terminal
+  allows, selection-following, position footer (`3/108 ↓`), g/G jump. Pool
+  caps raised: zoxide seed 25→100, merged pool 50→200, menu shows everything.
+- MOUSE: wheel scrolls the menu, left-click cds to the clicked row,
+  right-click cancels (SGR mouse reporting, armed only while the menu is
+  open, disarmed on every exit path; click rows mapped via one cursor-position
+  report). Terminals without mouse support are simply unaffected.
+
+
 ## v0.9.0 — 2026-07-10
 
 - The dropdown backlog is now a real **history replay**, not just absolute-cd
