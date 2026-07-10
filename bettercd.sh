@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.6.0"
+BETTERCD_VERSION="0.7.0"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -346,6 +346,16 @@ __bettercd_anim_precmd() {
     # pushd, autocd. Hot path, so pure string ops, zero forks, no dedup/cap
     # here; the menu dedups + drops $PWD + caps at 8 lazily when it opens.
     if [ "$PWD" != "${_BETTERCD_LASTPWD-}" ]; then
+        # remember this dir's inode while it still exists — inodes survive
+        # same-filesystem renames/moves, which is what lets a later miss say
+        # "moved, and here's where" instead of a bare error. `ls -di` is the
+        # portable inode read (POSIX; no BSD-vs-GNU stat flags). One fork per
+        # DIRECTORY CHANGE, never per prompt. (Windows/PS port: NTFS FileID.)
+        _bcd_ino="$(command ls -di "$PWD" 2>/dev/null)"
+        _bcd_ino="${_bcd_ino#"${_bcd_ino%%[0-9]*}"}"   # ltrim to first digit
+        _bcd_ino="${_bcd_ino%%[!0-9]*}"                 # keep leading digits only
+        [ -n "$_bcd_ino" ] && _BETTERCD_INOS="$_bcd_ino $PWD
+${_BETTERCD_INOS-}"
         [ -n "${_BETTERCD_LASTPWD-}" ] && _BETTERCD_RECENT="$_BETTERCD_LASTPWD
 ${_BETTERCD_RECENT-}"
         _BETTERCD_LASTPWD="$PWD"
@@ -459,6 +469,48 @@ __bettercd_magic_window() {
 }
 
 # Arm the magic window: remember this dash and stay magic until now+WINDOW.
+# A known dir vanished (cd - target gone). Deleted or moved? Inodes answer:
+# same-filesystem renames/moves keep the inode, so search nearby scopes for
+# it — found means moved (and we know where), else "deleted or moved away".
+# Cross-filesystem moves change inodes: honest fallback message, no guessing.
+__bettercd_vanished() { # $1 = the missing dir; rc0 = relocated + cd'd there
+    __bettercd_colors_v=""
+    if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then __bettercd_colors_v=1; fi
+    _bcd_vino=""
+    while IFS= read -r _bcd_vl; do
+        case "$_bcd_vl" in
+            *" $1") _bcd_vino="${_bcd_vl%% *}"; break ;;
+        esac
+    done <<__BCD_EOF__
+${_BETTERCD_INOS-}
+__BCD_EOF__
+    _bcd_vnew=""
+    if [ -n "$_bcd_vino" ]; then
+        _bcd_vpar="${1%/*}"; [ -n "$_bcd_vpar" ] || _bcd_vpar="/"
+        _bcd_vgp="${_bcd_vpar%/*}"; [ -n "$_bcd_vgp" ] || _bcd_vgp="/"
+        _bcd_vnew="$(command find "$_bcd_vpar" -maxdepth 2 -inum "$_bcd_vino" -type d 2>/dev/null | head -1)"
+        [ -n "$_bcd_vnew" ] || \
+            _bcd_vnew="$(command find "$_bcd_vgp" -maxdepth 3 -inum "$_bcd_vino" -type d 2>/dev/null | head -1)"
+    fi
+    if [ -n "$_bcd_vnew" ] && [ "$_bcd_vnew" != "$1" ] && [ -d "$_bcd_vnew" ]; then
+        if [ -n "$__bettercd_colors_v" ]; then
+            printf '\033[38;5;213m✻\033[0m \033[2m%s is now\033[0m \033[1;36m%s\033[0m \033[2m— taking you there\033[0m\n' \
+                "$(__bettercd_home_rel "$1")" "$(__bettercd_home_rel "$_bcd_vnew")" >&2
+        else
+            printf 'bettercd: %s is now %s — taking you there\n' "$1" "$_bcd_vnew" >&2
+        fi
+        __bettercd_delegate "$_bcd_vnew" && __bettercd_clear_miss
+        return $?
+    fi
+    if [ -n "$__bettercd_colors_v" ]; then
+        printf '\033[38;5;213m✻\033[0m \033[1;36m%s\033[0m \033[2mdoes not exist there anymore (deleted or moved away)\033[0m\n' \
+            "$(__bettercd_home_rel "$1")" >&2
+    else
+        printf 'bettercd: %s does not exist there anymore (deleted or moved away)\n' "$1" >&2
+    fi
+    return 1
+}
+
 __bettercd_dash_arm() { # $1 = now (epoch secs)
     case "${1-}" in ''|*[!0-9]*) return 0 ;; esac
     _BETTERCD_LAST_DASH="$1"
@@ -591,7 +643,7 @@ __bettercd_menu_loop() { # $1 list, $2 count
 
 # Entry point: build the list (OLDPWD first + deduped recent, cap 8), or fall
 # back to a silent classic toggle when there's nothing worth a menu.
-__bettercd_magic_menu() {
+__bettercd_magic_menu() { # $1 = "forced" when the user explicitly asked (cd --)
     __bettercd_tty_ok || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
     _bcd_mm_list=""; _bcd_mm_n=0
     if [ -n "${OLDPWD-}" ] && [ -d "$OLDPWD" ]; then
@@ -612,7 +664,14 @@ $_bcd_mm_r
     done <<__BCD_EOF__
 ${_BETTERCD_RECENT-}
 __BCD_EOF__
-    if [ "$_bcd_mm_n" -le 1 ]; then          # just OLDPWD or empty → classic
+    if [ "${1-}" = forced ]; then
+        # explicit ask (cd --): always show what we have; nothing at all →
+        # say so prettily instead of silently doing something else
+        if [ "$_bcd_mm_n" -eq 0 ]; then
+            printf '\033[38;5;213m✻\033[0m \033[2mno recent places yet — move around a little first\033[0m\n' >&2
+            return 1
+        fi
+    elif [ "$_bcd_mm_n" -le 1 ]; then        # auto mode, just OLDPWD/empty → classic
         __bettercd_delegate - && __bettercd_clear_miss
         return $?
     fi
@@ -631,6 +690,13 @@ cd() {
             __bettercd_delegate "$@" && __bettercd_clear_miss
             return $? ;;
         - )
+            # vanished toggle target: pretty in-brand message (and auto-follow
+            # a same-filesystem move) instead of the delegate's raw error.
+            # Interactive only — scripts keep the stock failure exactly.
+            if [ -n "${OLDPWD-}" ] && [ ! -d "$OLDPWD" ] && __bettercd_interactive; then
+                __bettercd_vanished "$OLDPWD"
+                return $?
+            fi
             # magic cd -: two in a row (or an active window) → dropdown.
             # Non-interactive OR BETTERCD_MAGIC=0 → exact classic toggle.
             _bcd_now="$(date +%s 2>/dev/null)"   # external date OK: rare path
@@ -651,7 +717,7 @@ cd() {
             # `cd --` opens the dropdown directly (interactive, magic not off).
             if __bettercd_interactive && [ "${BETTERCD_MAGIC-1}" != 0 ]; then
                 __bettercd_dash_arm "$(date +%s 2>/dev/null)"
-                __bettercd_magic_menu
+                __bettercd_magic_menu forced
                 return $?
             fi
             __bettercd_delegate "$@" && __bettercd_clear_miss
@@ -841,7 +907,10 @@ __bettercd_help() {
         "cd <missing>/"  "trailing slash: always create (skips fuzzy jump)" \
         "cd <typo>"      "close-match sibling? → did-you-mean before mkdir" \
         "cd <file>:42:7" "editor/stack-trace paste → cd to the file's dir" \
-        "cd <file>"      "jump to the file's parent directory"
+        "cd <file>"      "jump to the file's parent directory" \
+        "cd -"           "toggle; twice in 60s → ✻ dropdown (5-min mode)" \
+        "cd --"          "always open the ✻ recent-places dropdown" \
+        "builtin cd -"   "always the classic toggle (bypasses bettercd)"
     printf "\n  ${_bh_S}COMMANDS${_bh_R}\n"
     printf "    ${_bh_C}%-22s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
         "undo-cd"          "go back + remove what the last cd created" \

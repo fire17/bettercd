@@ -360,6 +360,38 @@ list="/a
 [ "$(__bettercd_nthline "$list" 0)" = /a ] && [ "$(__bettercd_nthline "$list" 2)" = /c ]
 check "magic: nthline picks the right row" $?
 
+# 25. vanished cd - target: moved → auto-follow; deleted → clean message
+if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
+    _BETTERCD_FORCE_INTERACTIVE=1
+    mkdir -p "$TMP/van/orig" && cd "$TMP/van/orig" && cd "$TMP/van"
+    # seed the inode record the way precmd would (suite has no prompt loop)
+    __bettercd_anim_precmd >/dev/null 2>&1
+    _BETTERCD_LASTPWD="$TMP/van"
+    ino="$(ls -di "$TMP/van/orig")"; ino="${ino%%[!0-9]*}"
+    _BETTERCD_INOS="$ino $TMP/van/orig
+$_BETTERCD_INOS"
+    OLDPWD="$TMP/van/orig"
+    mv "$TMP/van/orig" "$TMP/van/renamed"
+    cd - >/dev/null 2>"$TMP/.vanerr"
+    [ "$PWD" = "$TMP/van/renamed" ] && grep -q "is now" "$TMP/.vanerr"
+    check "vanished: moved dir auto-followed via inode" $?
+    cd "$TMP/van"
+    OLDPWD="$TMP/van/renamed"
+    rm -rf "$TMP/van/renamed"
+    cd - >/dev/null 2>"$TMP/.vanerr"
+    rc=$?
+    [ $rc -ne 0 ] && grep -q "does not exist there anymore" "$TMP/.vanerr" && [ "$PWD" = "$TMP/van" ]
+    check "vanished: deleted dir gets clean message, rc 1" $?
+    # non-interactive keeps stock failure (no pretty message)
+    unset _BETTERCD_FORCE_INTERACTIVE
+    OLDPWD="$TMP/van/gone-zzz"
+    cd - >/dev/null 2>"$TMP/.vanerr" </dev/null
+    rc=$?
+    [ $rc -ne 0 ] && ! grep -q "does not exist there anymore" "$TMP/.vanerr"
+    check "vanished: non-interactive keeps stock error" $?
+    cd "$TMP"
+fi
+
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
 rm -rf "$TMP"

@@ -71,6 +71,8 @@ flowchart LR
 - **`cd some/file.txt` → jumps to the file's parent directory** instead of erroring.
 - **`bettercd doctor`** — checks zoxide is installed and working, whether it owns `cd`, whether fuzzy interactive search (fzf) is available, and that bettercd is loaded in the right order. `--fix` backs up your setup first, then offers to install what's missing.
 - **`bettercd backup`** — snapshots your current cd paradigm (your `cd` function, aliases, rc files, zoxide database) plus a `RESTORE.md` with exact steps to return to it.
+- **Magic `cd -`, with honest escape hatches.** `cd -` once = classic toggle. Twice within a minute = a ✻ sparkling dropdown of recent places (Enter = the classic target), armed for 5 refreshing minutes. **Conventions: `cd --` always opens the dropdown · `builtin cd -` is always the pure classic toggle**, in any mode. `bettercd magic on|off|status|window <min>`.
+- **Vanished dirs get a real answer.** `cd -` back to a dir that was renamed/moved? bettercd remembers inodes, finds it, tells you — `✻ test is now test2 — taking you there` — and goes. Actually deleted: a clean `does not exist there anymore (deleted or moved away)` instead of a raw shell error.
 - **`cd..` just works** — the classic no-space typo: `cd..` → `cd ..`, `cd...` → `cd ../..`, up to `cd.....`. (`BETTERCD_CD_TYPOS=0` to disable.)
 - Flags (`cd -P`), `cd -`, `CDPATH`, dir-stack (`cd +2`), custom `cd` functions: all preserved and passed through.
 

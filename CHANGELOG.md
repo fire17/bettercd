@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.7.0 — 2026-07-10
+
+- `cd --` now ALWAYS opens the dropdown (even on first use / thin history;
+  zero recent places → a friendly note instead of silently toggling). The
+  convention pair: `cd --` = always dropdown, `builtin cd -` = always classic.
+
+- Vanished `cd -` targets get a beautiful answer instead of the delegate's raw
+  error. Every visited dir's inode is remembered while it exists (`ls -di`,
+  POSIX-portable; one fork per directory change, never per prompt) — inodes
+  survive same-filesystem renames/moves, so `mv test test2; cd -` now prints
+  `✻ …/test is now …/test2 — taking you there` and follows automatically.
+  Not found nearby (deleted, or moved across filesystems): `✻ …/test does not
+  exist there anymore (deleted or moved away)`, clean rc 1. Interactive only —
+  scripts keep the stock failure exactly. (Windows/PowerShell port note: NTFS
+  FileID is the inode equivalent — seam marked in the source.)
+
+
 ## v0.6.0 — 2026-07-10
 
 - **Magic `cd -`** — a sparkling dropdown of recent places. Hit `cd -` a second
