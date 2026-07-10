@@ -1,8 +1,24 @@
+<div align="center">
+<img src="assets/banner.svg" width="100%" alt="bettercd — a better cd: zoxide-aware, auto-mkdir, with undo">
+
+[![ci](https://github.com/fire17/bettercd/actions/workflows/ci.yml/badge.svg)](https://github.com/fire17/bettercd/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/fire17/bettercd?color=e8b84a)](https://github.com/fire17/bettercd/releases)
+[![overhead](https://img.shields.io/badge/overhead-~25µs%20per%20cd-2ea44f)](#performance)
+[![tests](https://img.shields.io/badge/tests-34×2%20%2B%20smokes%20green-2ea44f)](tests/suite.sh)
+[![deps](https://img.shields.io/badge/deps-zero-9bd1f5)](#install)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![stars](https://img.shields.io/github/stars/fire17/bettercd?style=social)](https://github.com/fire17/bettercd/stargazers)
+
+<i>cd has two answers: it works, or it wastes your time. This removes the second one.</i>
+
+**[⚡ Quickstart](#install)** · **[✻ The sparkle line](#the-sparkle-line)** · **[🛟 Safety design](#the-safety-design)** · **[🏎 Performance](#performance)** · **[❓ FAQ](#faq)**
+</div>
+
+---
+
 # bettercd
 
 **A better `cd` — zoxide-aware, auto-mkdir, with undo. One file of pure shell, zero dependencies, ~25µs overhead.**
-
-`cd` has two answers: it works, or it wastes your time. `bettercd` removes the second one.
 
 ```console
 $ cd projects/newapp/src        # …doesn't exist yet
@@ -16,6 +32,31 @@ cd: no such file or directory: /etc/nope
 bettercd: outside the current dir — repeat the command to create it.
 $ cd /etc/nope                  # you meant it? ok, ask first:
 bettercd: create /etc/nope ? [y/N]
+```
+
+## The sparkle line
+
+The part that should stop you: **the create announcement animates *after* your prompt is back.** The leading `+` cycles unicode sparkles (`✢ ✳ ✶ ✻ ✽`) for ~2 seconds on a line the shell has already scrolled past, then settles — while you're free to type. Terminals don't have a widget for that; it's built from raw pieces:
+
+- The announce is **deferred to a `precmd` hook**, so it prints after ALL command output — the glyph's absolute row (CSI 6n cursor-position report) is exact even for `cd x && make`, at the bottom of the screen, under multi-line prompts.
+- A **detached animator** redraws just that one cell, wrapped in cursor save/restore — your typing is untouched; typed-ahead keystrokes the cursor query swallows are pushed back into zsh's editor (`print -z`).
+- **precmd/preexec hooks kill it** the instant anything would scroll, so it can never draw on the wrong line.
+- Every escape hatch stock `cd` users expect: scripts and non-tty shells get plain static text; `BETTERCD_SPARKLE=0` turns it off entirely.
+
+> [!IMPORTANT]
+> All of it is one sourced file of POSIX-leaning shell. No daemon, no compiled helper, no prompt-framework dependency — and the happy path (directory exists) is still ~25µs.
+
+```mermaid
+flowchart LR
+    A["cd somewhere"] --> B{"exists?"}
+    B -->|"yes"| C["plain cd<br/><i>zoxide-aware, ~25µs</i>"]
+    B -->|"no, zoxide knows it"| D["fuzzy jump wins"]
+    B -->|"no, under cwd"| E["mkdir -p + cd<br/>✻ sparkle announce + undo-cd"]
+    B -->|"no, outside cwd"| F["fail once with hint<br/>retry → y/N prompt"]
+    style A fill:#1a1030,stroke:#e8b84a,color:#f5d67b
+    style C fill:#101a2e,stroke:#2ea44f,color:#7ee2a8
+    style E fill:#1a1030,stroke:#e8b84a,color:#f5d67b
+    style F fill:#101a2e,stroke:#5fb3e8,color:#9bd1f5
 ```
 
 ## What it does
@@ -117,10 +158,28 @@ Remove the `# >>> bettercd >>>` block (or the `source … bettercd.sh` line) fro
 
 **zoxide's doctor complains that it isn't last in my rc?** It would — bettercd deliberately wraps zoxide's `cd` (and delegates to it faithfully), which is exactly what zoxide's heuristic flags. bettercd silences that one false positive by setting `_ZO_DOCTOR=0` in zoxide mode, unless you've set it yourself.
 
-**What shells?** bash and zsh (macOS, Linux, WSL, Git Bash). The core is POSIX-clean and loads under dash. fish and PowerShell are on the roadmap.
+**What shells?** bash and zsh (macOS, Linux, WSL, Git Bash). The core is POSIX-clean and loads under dash and posix-mode sh. fish and PowerShell are on the roadmap.
 
 **What about muscle memory on servers without it?** Fair warning: you may come to expect `cd` to create. On bare machines it just fails like it always did — nothing breaks, you just miss it.
 
-## License
+## How it's verified
+
+Every push runs 34 assertions under **bash and zsh** each, a deterministic zoxide-stub suite (6 more per shell), and smoke tests under **both dash and posix-mode sh** — on ubuntu and macos ([CI](https://github.com/fire17/bettercd/actions/workflows/ci.yml)), shellcheck-clean. Releases are gate-checked by installing from the published tap (`brew install fire17/tap/bettercd && brew test`). That gate has caught two real defects before users saw them: zoxide's doctor false-positive (fixed in v0.1.1) and a posix-mode `/bin/sh` sourcing failure (fixed in v0.2.1, same day it shipped).
+
+## Siblings
+
+- [**betterkill**](https://github.com/fire17/betterkill) — a better `kill`: pids, `%jobs`, `:ports`, and names. Same philosophy: compose, never clobber; TERM before KILL; scripts never get surprises.
+
+---
+
+<div align="center">
+
+**Every `cd` you didn't have to retype is time back.**
+Star it so the next person's shell stops wasting theirs. ✻
+
+[![Star History Chart](https://api.star-history.com/svg?repos=fire17/bettercd&type=Date)](https://star-history.com/#fire17/bettercd&Date)
 
 [MIT](LICENSE) © [fire17](https://github.com/fire17)
+
+<sub><i>one file of shell, verified like it matters — the undo command is printed at the moment of the side effect</i></sub>
+</div>
