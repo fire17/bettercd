@@ -1,9 +1,10 @@
 #!/bin/sh
-# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC1091,SC2181,SC2217,SC2034,SC3044,SC2154,SC2088
+# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC1091,SC2181,SC2217,SC2034,SC3044,SC2154,SC2088,SC3045
 #   cd failing, inspecting $? after it, and feeding its [y/N] prompt via stdin
 #   are exactly what this suite tests. SC2154: _bcd_dash_mode is set by the
 #   sourced bettercd.sh. SC2088: the ~ in a home-rel expectation is a literal
-#   string to compare against, not a path meant to expand.
+#   string to compare against, not a path meant to expand. SC3045: `cd --status`
+#   etc. exercise bettercd's own long-flag routing (defined, not POSIX-undefined).
 # bettercd test suite — pure POSIX sh, runs under bash and zsh.
 # Usage: BETTERCD_SH=/path/to/bettercd.sh <shell> tests/suite.sh
 
@@ -648,6 +649,169 @@ cd ... 2>/dev/null
 [ "$PWD" = "$TMP/dots" ] && [ ! -d "$TMP/dots/a/b/..." ]
 check "cd ... (spaced) goes up two" $?
 cd "$TMP"
+
+# 32. W3 per-column sort engine + header-click column resolver ----------------
+cd "$TMP"
+_BETTERCD_MENU_NOW="$(date +%s 2>/dev/null)"
+
+# 32a. column resolver: pure x→column math at a known width (cols=100 → tnw=42)
+__bcd_rz() { __bettercd_col_resolve "$1" 100; printf '%s' "$_bcd_col"; }
+[ "$(__bcd_rz 3)" = name ] && [ "$(__bcd_rz 44)" = name ]; check "colmap: Directory range → name" $?
+[ -z "$(__bcd_rz 45)" ]; check "colmap: gap between columns → none" $?
+[ "$(__bcd_rz 46)" = visited ] && [ "$(__bcd_rz 60)" = modified ] && [ "$(__bcd_rz 70)" = created ]
+check "colmap: visited/modified/created ranges" $?
+[ "$(__bcd_rz 80)" = version ] && [ "$(__bcd_rz 90)" = ship ] && [ "$(__bcd_rz 120)" = size ]
+check "colmap: version/ship/size ranges" $?
+
+# 32b. header-click sort cycle: primary → reversed → recent; other col resets
+_bcd_ml_sort=recent
+__bettercd_sort_click modified; sc1="$_bcd_ml_sort"
+__bettercd_sort_click modified; sc2="$_bcd_ml_sort"
+__bettercd_sort_click modified; sc3="$_bcd_ml_sort"
+[ "$sc1" = modified ] && [ "$sc2" = modified-desc ] && [ "$sc3" = recent ]
+check "sort-click: cycles primary → desc → recent" $?
+_bcd_ml_sort=modified; __bettercd_sort_click visited
+[ "$_bcd_ml_sort" = visited ]; check "sort-click: a different column starts its primary" $?
+
+# 32c. footer sort label: name asc/desc differ, recent stays plain
+_bcd_ml_sort=name;      __bettercd_sort_label; sl1="$_bcd_sortlabel"
+_bcd_ml_sort=name-desc; __bettercd_sort_label; sl2="$_bcd_sortlabel"
+_bcd_ml_sort=recent;    __bettercd_sort_label; sl3="$_bcd_sortlabel"
+[ "$sl1" != "$sl2" ] && [ "$sl3" = recent ] && case "$sl1" in name*) true ;; *) false ;; esac
+check "sort-label: name asc/desc differ, recent plain" $?
+
+# 32d. visited: pure schwartzian against a fixture _BETTERCD_V (newest first)
+mkdir -p "$TMP/v1" "$TMP/v2" "$TMP/v3"
+_BETTERCD_V="100 $TMP/v1
+300 $TMP/v3
+200 $TMP/v2"
+_bcd_ml_pool="$TMP/v1
+$TMP/v2
+$TMP/v3"
+_bcd_ml_cachenote=0; __bettercd_menu_sort_field visited ''
+case "$_bcd_ml_op" in "$TMP/v3
+$TMP/v2
+$TMP/v1"*) ok ;; *) bad "sort: visited schwartzian newest-first" ;; esac
+__bettercd_visited_epoch "$TMP/v2"; [ "$_bcd_ve" = 200 ]; check "sort: visited_epoch raw lookup" $?
+
+# 32e. created: one stat sweep over the pool, every row rankable (no note)
+mkdir -p "$TMP/c1" "$TMP/c2"
+_BETTERCD_D2=""; _bcd_ml_pool="$TMP/c1
+$TMP/c2"
+_bcd_ml_cachenote=0; __bettercd_menu_sort_field created ''
+[ "$_bcd_ml_cachenote" = 0 ]; check "sort: created full sweep sets no cached-only note" $?
+
+# 32f. version: cached-only — ranks cached rows, sinks uncached, flags the note
+mkdir -p "$TMP/s1/.project" "$TMP/s2"
+printf 'version: v3.0\n' > "$TMP/s1/.project/status"
+_BETTERCD_D2=""; _bcd_ml_pool="$TMP/s1
+$TMP/s2"
+__bettercd_meta_d "$TMP/s1"   # prime ONLY s1 into the detail cache
+_bcd_ml_cachenote=0; __bettercd_menu_sort_field version ''
+[ "$_bcd_ml_cachenote" = 1 ]; check "sort: version cached-only sets the note" $?
+case "$_bcd_ml_op" in "$TMP/s1"*) ok ;; *) bad "sort: cached row ranks above sunk uncached" ;; esac
+
+# 32g. reverse helper flips a list (used for asc/desc on name & modified)
+[ "$(printf '%s\n' a b c | __bettercd_reverse | tr '\n' ' ')" = "c b a " ]
+check "sort: reverse helper flips order" $?
+
+# 32h. prefs round-trip with a per-column token; unknown token → recent
+_bcd_ml_table=0; _bcd_ml_preset=all; _BETTERCD_EMOJI=0
+_bcd_ml_sort=modified-desc; __bettercd_prefs_save
+_bcd_ml_sort=recent; __bettercd_prefs_load
+[ "$_bcd_ml_sort" = modified-desc ]; check "prefs: modified-desc round-trips" $?
+printf 'sort=bogus-token\n' > "$(__bettercd_prefs_file)"
+_bcd_ml_sort=name; __bettercd_prefs_load
+[ "$_bcd_ml_sort" = recent ]; check "prefs: unknown sort token falls back to recent" $?
+rm -f "$(__bettercd_prefs_file)"
+cd "$TMP"
+
+# 32i. W3 refinement: pins float to top ONLY on recent; under a column sort they
+# take true data rank but stay present (⚑ is drawn by identity, not position).
+mkdir -p "$TMP/paaa" "$TMP/pbbb" "$TMP/pzz" "$TMP/pwd_here"
+cd "$TMP/pwd_here"
+_bcd_ml_pool="$TMP/paaa
+$TMP/pbbb"
+_BETTERCD_PINS="$TMP/pzz"
+_bcd_ml_ext=""; _bcd_ml_full=0; _bcd_ml_preset=all
+_bcd_ml_sort=recent; __bettercd_menu_stageA
+pf1="$(printf '%s\n' "$_bcd_ml_base" | sed -n '1p' | cut -f1)"
+[ "$pf1" = "$TMP/pzz" ]; check "pins: float to top on recent order" $?
+_bcd_ml_sort=name; __bettercd_menu_stageA
+pf2="$(printf '%s\n' "$_bcd_ml_base" | sed -n '1p' | cut -f1)"
+[ "$pf2" = "$TMP/paaa" ]; check "pins: do NOT float under name sort (true rank)" $?
+case "$_bcd_ml_base" in *"$TMP/pzz"*) ok ;; *) bad "pins: pin still present under column sort" ;; esac
+_BETTERCD_PINS=""; cd "$TMP"
+
+# 32j. SPACE is a query character (dirs can contain spaces; filters live)
+mkdir -p "$TMP/my docs" "$TMP/nospace"
+_bcd_ml_pool="$TMP/my docs
+$TMP/nospace"
+_BETTERCD_PINS=""; _bcd_ml_sort=recent; _bcd_ml_preset=all; _bcd_ml_ext=""; _bcd_ml_full=1
+cd "$TMP/pwd_here"; __bettercd_menu_stageA
+_bcd_ml_query="my d"; _bcd_ml_qsrc="$_bcd_ml_base"; __bettercd_qstk_reset; __bettercd_menu_stageB
+[ "$_bcd_ml_n" = 1 ]; check "query: SPACE filters (subseq 'my d' → my docs)" $?
+_bcd_ml_query=""; _bcd_ml_full=0; cd "$TMP"
+
+# 32m. W7 query-stack: forward narrows monotonically; backspace POPS to the EXACT
+# cached level (same count AND same list) with no recompute; empty stack re-filters.
+mkdir -p "$TMP/qzebra" "$TMP/qzephyr" "$TMP/qmango"
+_bcd_ml_pool="$TMP/qzebra
+$TMP/qzephyr
+$TMP/qmango"
+_BETTERCD_PINS=""; _bcd_ml_sort=recent; _bcd_ml_preset=all; _bcd_ml_ext=""; _bcd_ml_full=1
+cd "$TMP/pwd_here"; __bettercd_menu_stageA
+_bcd_ml_query=""; _bcd_ml_qsrc="$_bcd_ml_base"; __bettercd_qstk_reset; __bettercd_menu_stageB
+qn0="$_bcd_ml_n"; ql0="$_bcd_ml_list"
+_bcd_ml_query="z";  __bettercd_qfwd; qn1="$_bcd_ml_n"; ql1="$_bcd_ml_list"
+_bcd_ml_query="ze"; __bettercd_qfwd; qn2="$_bcd_ml_n"; ql2="$_bcd_ml_list"
+# monotonic non-increasing as the query grows (subset property)
+[ "$qn0" -ge "$qn1" ] && [ "$qn1" -ge "$qn2" ] && [ "$qn2" -ge 1 ]; check "qstack: forward narrows monotonically" $?
+_bcd_ml_query="z"; __bettercd_qback
+[ "$_bcd_ml_n" = "$qn1" ] && [ "$_bcd_ml_list" = "$ql1" ]; check "qstack: backspace pops EXACT cached level" $?
+_bcd_ml_query=""; __bettercd_qback
+[ "$_bcd_ml_n" = "$qn0" ] && [ "$_bcd_ml_list" = "$ql0" ]; check "qstack: backspace to empty restores full list" $?
+_bcd_ml_query=""; __bettercd_qback; [ "$_bcd_ml_n" = "$qn0" ]; check "qstack: empty-stack backspace re-filters base" $?
+cd "$TMP"
+
+# 32n. W7b streaming ingest: reads NEW stream lines past the ingested count,
+# dedupes, folds into the base; a second ingest with no new lines returns 1;
+# stop() clears state and removes the temp stream.
+mkdir -p "$TMP/strA" "$TMP/strB"
+_bcd_ml_pool="$TMP/pwd_here"; _BETTERCD_PINS=""; _bcd_ml_sort=recent; _bcd_ml_preset=all
+_bcd_ml_ext=""; _bcd_ml_full=1; _bcd_ml_query=""; _bcd_ml_sel=0; _bcd_ml_off=0
+cd "$TMP/pwd_here"; __bettercd_menu_stageA
+_bcd_ml_qsrc="$_bcd_ml_base"; __bettercd_qstk_reset; __bettercd_menu_stageB
+_bcd_ml_streamf="$TMP/fake.stream"; _bcd_ml_streamn=0; _bcd_ml_streamq="str"; _bcd_ml_query="str"
+printf '%s\n%s\n' "$TMP/strA" "$TMP/strB" > "$_bcd_ml_streamf"
+__bettercd_stream_ingest; ig1=$?
+case "$_bcd_ml_ext" in *"$TMP/strA"*"$TMP/strB"*) ig_has=1 ;; *) ig_has=0 ;; esac
+[ "$ig1" = 0 ] && [ "$ig_has" = 1 ] && [ "$_bcd_ml_streamn" = 2 ]; check "stream: ingest folds new lines in (returns 0)" $?
+__bettercd_stream_ingest; [ "$?" = 1 ]; check "stream: re-ingest with no new lines returns 1" $?
+# stale-query guard: results for a query the user has typed past are discarded
+_bcd_ml_streamn=0; _bcd_ml_query="different"; __bettercd_stream_ingest; [ "$?" = 1 ]; check "stream: stale-query results discarded" $?
+_bcd_ml_query=""
+_bcd_ml_job=""; __bettercd_stream_stop
+[ -z "$_bcd_ml_streamf" ] && [ ! -f "$TMP/fake.stream" ]; check "stream: stop clears state + removes temp" $?
+cd "$TMP"
+
+# 32k. W4/W3: header column SGR — active column bold-white (1;97), rest dim (2)
+_bcd_hac=created
+__bettercd_hcol created; case "$_bcd_hcs" in *'1;97m') ok ;; *) bad "hcol: active column bold-white" ;; esac
+__bettercd_hcol visited; case "$_bcd_hcs" in *'[2m') ok ;; *) bad "hcol: inactive column dim" ;; esac
+
+# 32l. W1' prompt-width: zsh measures the LAST prompt line's display width; any
+# other shell returns empty so the menu falls back to the on-frame ⌕ echo.
+_bcd_nl_='
+'
+if [ -n "${ZSH_VERSION-}" ]; then
+    _bcd_ps_save="$PS1"
+    PS1="> ";               __bettercd_prompt_width; [ "$_bcd_pw" = 2 ]; check "promptwidth: zsh measures PS1 width" $?
+    PS1="aa${_bcd_nl_}bbbb> "; __bettercd_prompt_width; [ "$_bcd_pw" = 6 ]; check "promptwidth: zsh uses the last prompt line" $?
+    PS1="$_bcd_ps_save"
+else
+    __bettercd_prompt_width; [ -z "$_bcd_pw" ]; check "promptwidth: non-zsh returns empty (fallback)" $?
+fi
 
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"

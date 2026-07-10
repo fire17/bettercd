@@ -2,6 +2,56 @@
 
 ## Unreleased (v0.12.0)
 
+- The `✻ bettercd auto-updated to <ver>` notice is now a **centered, self-erasing
+  toast**: it prints centered on its own line at the next prompt and clears
+  itself after 2 seconds. If you run another command first, it simply stays in
+  scrollback (the eraser is cancelled, so it can never wipe the wrong line).
+  Non-interactive shells keep a plain one-line message.
+
+- **Blazing-fast dropdown filtering.** Typing now filters only the *previous*
+  keystroke's match set (which can only shrink), and Backspace is a pure pop of a
+  per-prefix cache — zero recompute. Measured on a 200-entry list: forward
+  ~6ms/key (was ~20), backspace ~8ms/key, both fork-free on a pure-typing
+  keystroke. Backspacing through a long query no longer touches the disk on every
+  key (that was the real lag), so retreating a query is instant.
+
+- **The dropdown query now types on your REAL command line.** Instead of a
+  separate echoed `cd -- <query>` row, the menu opens with an empty spacer line
+  and parks the cursor right after your typed `cd --`, so what you type appears
+  bold-cyan *continuing your actual command* (`cd -- myproj`) and filters live.
+  Backspace edits it; every exit restores the command line clean. On zsh the
+  parking column is computed from your prompt's real display width (multi-line
+  prompts use the last line); on bash — or any shell whose prompt width can't be
+  measured — it falls back to an honest `⌕ query` echo on the spacer. The whole
+  menu now positions absolutely from its measured top, so the help overlay,
+  flashes and redraws never disturb the command line above.
+- Dropdown width is now read authoritatively from the terminal at open (not just
+  `$COLUMNS`), so it renders correctly even when `$COLUMNS` is unset or stale,
+  and the footer key-hints truncate to fit — no wrapped "ghost" rows on a narrow
+  window. **The open menu now reflows on resize even with no keypress**: while it
+  sits idle it polls the terminal size on a ~2s tick (a single `stty` between
+  keystrokes — the per-keystroke path stays fork-free), so a resize converges
+  within ~2s on both zsh and bash; bash also keeps its instant next-key reflow.
+- The dropdown's on-disk search (for queries with few local matches) is now a
+  **non-blocking background stream**: a detached search writes results to a temp
+  file and they fold in as you keep typing — typing never pauses waiting on the
+  disk. Changing the query cancels the stale search; everything is cleaned up on
+  exit.
+- On exit the dropdown fully drains any pending input, so a trailing mouse-click
+  release byte can no longer swallow the first character of your next command.
+
+- Dropdown table header (V) now gets a **subtle full-width tint** and the
+  **active sort column's label is bold-white** while the rest read dim — so the
+  column you sorted by is obvious at a glance (direction arrow stays in the
+  `sort:col↑` footer to keep the header inside its exact width budget). The
+  header is byte-for-byte the same width as before — no wrap, no ghost rows.
+- **SPACE is now a query character** in the dropdown (directories can contain
+  spaces) — it filters live alongside lowercase letters, dots and dashes.
+- **Pins float to the top only in the default (recent) order.** Under any
+  explicit column sort (name/modified/visited/created/version/ship/size, via the
+  `R` key or a header click) pinned dirs take their *true* data rank and keep the
+  `⚑` glyph; floating resumes when you return to recent.
+
 - Full long-flag surface for cd: --status --version --undo --doctor --backup
   --places --magic --update --config all route to their features; unknown
   --flags get a ✻ one-liner + --help hint (and can never create a directory).
