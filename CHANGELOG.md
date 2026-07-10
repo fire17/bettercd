@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased (v0.11.0)
+
+- Menu: fixed 12-row window; wheel smooth-scrolls the viewport only
+  (selection stays anchored; footer indicators track position); hovering
+  selects the row under the pointer; click still cds, right-click cancels.
+
+
 ## v0.10.0 — 2026-07-10
 
 - THE BIG LIST: the dropdown now scrolls — viewport as tall as the terminal

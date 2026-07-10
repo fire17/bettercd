@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.10.0"
+BETTERCD_VERSION="0.11.0-dev"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -591,10 +591,13 @@ __BCD_EOF__
 # stty is restored before EVERY return path (trap-free by design).
 __bettercd_menu_loop() { # $1 list, $2 count
     _bcd_ml_list="$1"; _bcd_ml_n="$2"; _bcd_ml_sel=0; _bcd_ml_frame=0; _bcd_ml_off=0
+    _bcd_ml_psel=0; _bcd_ml_poff=0
     # viewport: as tall as the terminal comfortably allows (the "big list"),
     # scrolls under the selection; footer shows position + more-indicators
-    _bcd_ml_vis="${LINES:-24}"; _bcd_ml_vis=$((_bcd_ml_vis - 6))
-    [ "$_bcd_ml_vis" -ge 5 ] || _bcd_ml_vis=5
+    _bcd_ml_vis=12
+    _bcd_ml_lmax="${LINES:-24}"; _bcd_ml_lmax=$((_bcd_ml_lmax - 6))
+    [ "$_bcd_ml_lmax" -ge 5 ] || _bcd_ml_lmax=5
+    [ "$_bcd_ml_vis" -le "$_bcd_ml_lmax" ] || _bcd_ml_vis="$_bcd_ml_lmax"
     [ "$_bcd_ml_vis" -le "$_bcd_ml_n" ] || _bcd_ml_vis="$_bcd_ml_n"
     _bcd_ml_lines=$((_bcd_ml_vis + 2))   # header + window + footer
     _bcd_ml_st="$(command stty -g </dev/tty 2>/dev/null)"
@@ -603,7 +606,7 @@ __bettercd_menu_loop() { # $1 list, $2 count
     # SGR mouse reporting: wheel scrolls, left-click cds, right-click cancels.
     # Armed ONLY while the menu is open; disarmed on EVERY exit path below —
     # a leaked mouse mode garbles the terminal worse than a raw stty.
-    printf '\033[?1000h\033[?1006h' >/dev/tty
+    printf '\033[?1003h\033[?1006h' >/dev/tty
     __bettercd_menu_draw "$_bcd_ml_list" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame" "$_bcd_ml_off" "$_bcd_ml_vis"
     # menu top row (for click→row mapping): one CPR — cursor now sits just
     # below the footer, so top = row - lines. Raw mode is already on.
@@ -658,8 +661,20 @@ __bettercd_menu_loop() { # $1 list, $2 count
                         case "$_bcd_ml_btn$_bcd_ml_my" in *[!0-9]*) _bcd_ml_mf="" ;; esac
                         if [ -n "$_bcd_ml_mf" ]; then
                             case "$_bcd_ml_btn" in
-                                64) _bcd_ml_move=up ;;
-                                65) _bcd_ml_move=down ;;
+                                64) # wheel up: smooth-scroll the viewport, selection stays
+                                    [ "$_bcd_ml_off" -gt 0 ] && _bcd_ml_off=$((_bcd_ml_off - 1)) ;;
+                                65) # wheel down
+                                    [ "$_bcd_ml_off" -lt $(( _bcd_ml_n - _bcd_ml_vis )) ] && \
+                                        _bcd_ml_off=$((_bcd_ml_off + 1)) ;;
+                                35) # hover: select the row under the pointer
+                                    if [ -n "$_bcd_ml_top" ]; then
+                                        _bcd_ml_ci=$(( _bcd_ml_my - _bcd_ml_top - 1 + _bcd_ml_off ))
+                                        if [ "$_bcd_ml_ci" -ge "$_bcd_ml_off" ] && \
+                                           [ "$_bcd_ml_ci" -lt $(( _bcd_ml_off + _bcd_ml_vis )) ] && \
+                                           [ "$_bcd_ml_ci" -lt "$_bcd_ml_n" ]; then
+                                            _bcd_ml_sel="$_bcd_ml_ci"
+                                        fi
+                                    fi ;;
                                 0)
                                     # left press on a menu row → cd there
                                     if [ "$_bcd_ml_mf" = M ] && [ -n "$_bcd_ml_top" ]; then
@@ -697,14 +712,22 @@ __bettercd_menu_loop() { # $1 list, $2 count
             _bcd_ml_frame=$((_bcd_ml_frame + 1))
         fi
         [ -n "$_bcd_ml_act" ] && break
-        # viewport follows the selection
-        [ "$_bcd_ml_sel" -lt "$_bcd_ml_off" ] && _bcd_ml_off="$_bcd_ml_sel"
-        [ "$_bcd_ml_sel" -ge $(( _bcd_ml_off + _bcd_ml_vis )) ] &&             _bcd_ml_off=$(( _bcd_ml_sel - _bcd_ml_vis + 1 ))
-        printf '\033[%dA' "$_bcd_ml_lines" >/dev/tty
-        __bettercd_menu_draw "$_bcd_ml_list" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame" "$_bcd_ml_off" "$_bcd_ml_vis"
+        # viewport follows the selection on KEYBOARD moves only — wheel
+        # scrolling must glide freely without yanking back to the selection
+        if [ -n "$_bcd_ml_move" ]; then
+            [ "$_bcd_ml_sel" -lt "$_bcd_ml_off" ] && _bcd_ml_off="$_bcd_ml_sel"
+            [ "$_bcd_ml_sel" -ge $(( _bcd_ml_off + _bcd_ml_vis )) ] && \
+                _bcd_ml_off=$(( _bcd_ml_sel - _bcd_ml_vis + 1 ))
+        fi
+        # redraw only when something changed (hover floods motion events)
+        if [ "$_bcd_ml_sel" != "${_bcd_ml_psel-}" ] || [ "$_bcd_ml_off" != "${_bcd_ml_poff-}" ]; then
+            printf '\033[%dA' "$_bcd_ml_lines" >/dev/tty
+            __bettercd_menu_draw "$_bcd_ml_list" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame" "$_bcd_ml_off" "$_bcd_ml_vis"
+            _bcd_ml_psel="$_bcd_ml_sel"; _bcd_ml_poff="$_bcd_ml_off"
+        fi
     done
 
-    printf '\033[?1006l\033[?1000l' >/dev/tty            # disarm mouse FIRST
+    printf '\033[?1006l\033[?1003l' >/dev/tty            # disarm mouse FIRST
     printf '\033[%dA\033[J' "$_bcd_ml_lines" >/dev/tty   # erase the menu
     command stty "$_bcd_ml_st" </dev/tty 2>/dev/null      # restore BEFORE acting
     if [ "$_bcd_ml_act" = select ]; then
