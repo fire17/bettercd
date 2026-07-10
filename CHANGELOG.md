@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.0 — 2026-07-10
+
+- ↑ history hint: after a create, a synthetic `undo-cd` is pushed into the
+  CURRENT shell's in-memory history (zsh `print -s` / bash `history -s`), so
+  pressing Up at the fresh prompt offers the revert — the announce line now
+  says "press ↑ or run undo-cd". Current shell only by design (undo state is
+  session-local; other shells couldn't undo). `BETTERCD_HISTORY_HINT=0` opts out.
+
+
 ## v0.3.1 — 2026-07-10
 
 - Lint: simplify a typo-guard test that newer shellcheck (CI) flags as SC2015;

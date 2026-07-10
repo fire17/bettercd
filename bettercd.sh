@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.3.1"
+BETTERCD_VERSION="0.4.0"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -315,7 +315,21 @@ __bettercd_anim_kill() {
 }
 
 __bettercd_sparkline() { # $1 = created target — the colored one-liner
-    printf '\033[1;32m+\033[0m auto created & cd to \033[1;36m%s\033[0m \033[2m- if you did not mean this - please run \033[0m\033[1mundo-cd\033[0m\033[2m to revert this action\033[0m\n' "$1" >&2
+    printf '\033[1;32m+\033[0m auto created & cd to \033[1;36m%s\033[0m \033[2m- if you did not mean this - press \033[0m\033[1m↑\033[0m\033[2m or run \033[0m\033[1mundo-cd\033[0m\033[2m to revert this action\033[0m\n' "$1" >&2
+}
+
+# History hint: push a synthetic `undo-cd` into THIS shell's in-memory history
+# right after a create, so pressing ↑ at the fresh prompt offers the revert.
+# Current shell only — undo state is session-local, so other shells' history
+# files would offer an undo-cd that can't undo. BETTERCD_HISTORY_HINT=0 opts out.
+__bettercd_history_hint() {
+    [ "${BETTERCD_HISTORY_HINT-1}" != 0 ] || return 0
+    if [ -n "${ZSH_VERSION-}" ]; then
+        print -s -- undo-cd 2>/dev/null
+    elif [ -n "${BASH_VERSION-}" ]; then
+        history -s undo-cd 2>/dev/null
+    fi
+    return 0
 }
 
 # Runs right before every prompt. A pending create prints its line here —
@@ -328,6 +342,7 @@ __bettercd_anim_precmd() {
     _BETTERCD_ANIM_PENDING=""
     if ! __bettercd_cursor_pos; then
         __bettercd_sparkline "$_bcd_t"   # no cursor report: static line, no anim
+        __bettercd_history_hint
         return 0
     fi
     _bcd_start="$_bcd_crow"
@@ -336,7 +351,8 @@ __bettercd_anim_precmd() {
         _bcd_start=$((_bcd_start + 1))
     fi
     __bettercd_sparkline "$_bcd_t"
-    _bcd_plain="+ auto created & cd to $_bcd_t - if you did not mean this - please run undo-cd to revert this action"
+    __bettercd_history_hint
+    _bcd_plain="+ auto created & cd to $_bcd_t - if you did not mean this - press X or run undo-cd to revert this action"
     _bcd_rows=$(( (${#_bcd_plain} - 1) / ${COLUMNS:-80} + 1 ))
     # ponytail: bash prompts assumed 1 line; zsh counts expanded PS1 lines
     _bcd_pl=1
@@ -612,6 +628,7 @@ __bettercd_help() {
         "BETTERCD_QUIET=1"       "suppress hints" \
         "BETTERCD_TYPO_GUARD=0"  "disable the did-you-mean typo guard" \
         "BETTERCD_SPARKLE=0"     "disable the animated create line" \
+        "BETTERCD_HISTORY_HINT=0" "don't push undo-cd into history after a create" \
         "BETTERCD_SPARKLE_GLYPHS" "space-separated sparkle glyph frames" \
         "BETTERCD_SPARKLE_COLORS" "space-separated 256-color codes"
     printf "\n  ${_bh_S}EXAMPLE${_bh_R}\n"

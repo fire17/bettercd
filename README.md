@@ -22,7 +22,7 @@
 
 ```console
 $ cd projects/newapp/src        # …doesn't exist yet
-+ auto created & cd to /home/you/projects/newapp/src - if you did not mean this - please run undo-cd to revert this action
++ auto created & cd to /home/you/projects/newapp/src - if you did not mean this - press ↑ or run undo-cd to revert this action
 
 $ cd proj                       # exists in your zoxide history
 /home/you/projects/newapp       # fuzzy jump, exactly like before
@@ -147,6 +147,7 @@ BETTERCD_AUTO_CREATE=0    disable auto-create
 BETTERCD_QUIET=1          suppress hints
 BETTERCD_TYPO_GUARD=0     disable the did-you-mean typo guard
 BETTERCD_SPARKLE=0        disable the animated create line
+BETTERCD_HISTORY_HINT=0   don't push undo-cd into history after a create
 BETTERCD_SPARKLE_GLYPHS   space-separated glyph frames  (default: ✢ ✳ ✶ ✻ ✽ ✻ ✶ ✳)
 BETTERCD_SPARKLE_COLORS   space-separated 256-color codes (default: 213 219 177 225)
 ```
