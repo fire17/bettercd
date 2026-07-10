@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.0 — 2026-07-10
+
+- `cd -` is exactly classic again BY DEFAULT — the auto-magic (second dash
+  within 60s → dropdown, refreshing window) is now opt-in via
+  `bettercd magic on` / `BETTERCD_MAGIC=1`. `cd --` remains the dropdown's
+  home, always.
+- The dropdown's first open seeds a one-time backlog of past places: zoxide's
+  db when available (real visited dirs, frecency-ordered), else zsh/bash
+  history `cd` commands with absolute/~ targets (relative entries are
+  unresolvable — the cwd they were typed in is unknown). Lazy: no startup cost.
+
+
 ## v0.7.0 — 2026-07-10
 
 - `cd --` now ALWAYS opens the dropdown (even on first use / thin history;

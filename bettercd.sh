@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.7.0"
+BETTERCD_VERSION="0.8.0"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -520,10 +520,10 @@ __bettercd_dash_arm() { # $1 = now (epoch secs)
 # Decision helper (now as $1 so the suite can test it without a clock or a
 # tty). Sets _bcd_dash_mode to classic|magic and updates _BETTERCD_LAST_DASH /
 # _BETTERCD_MAGIC_UNTIL. Must run in the CURRENT shell (never via $(...)): the
-# state it updates has to persist across cd - invocations. BETTERCD_MAGIC=0 →
-# always classic.
+# state it updates has to persist across cd - invocations. Auto-magic is
+# OPT-IN: anything but BETTERCD_MAGIC=1 → always classic.
 __bettercd_dash_mode() { # $1 = now → sets $_bcd_dash_mode
-    if [ "${BETTERCD_MAGIC-1}" = 0 ]; then
+    if [ "${BETTERCD_MAGIC-0}" != 1 ]; then
         _BETTERCD_LAST_DASH="$1"; _bcd_dash_mode=classic; return 0
     fi
     # inside an active window → magic, and refresh the window
@@ -641,10 +641,46 @@ __bettercd_menu_loop() { # $1 list, $2 count
     return 1   # cancel
 }
 
+# One-time backlog seed for the dropdown: places you went BEFORE this session
+# started using bettercd. Best source is zoxide's db (real visited dirs,
+# absolute, frecency-ordered); fallback parses zsh/bash history for `cd`
+# commands with absolute or ~ targets ONLY — relative entries (`cd test`)
+# are honestly unresolvable: the cwd they were typed in is unknown. Runs
+# lazily at first menu build, never at source time (startup stays instant).
+__bettercd_seed_recent() {
+    [ -n "${_BETTERCD_SEEDED-}" ] && return 0
+    _BETTERCD_SEEDED=1
+    _bcd_sd=""
+    if command -v zoxide >/dev/null 2>&1; then
+        _bcd_sd="$(command zoxide query -l 2>/dev/null | head -20)"
+    fi
+    if [ -z "$_bcd_sd" ]; then
+        for _bcd_shf in "${HISTFILE-}" "$HOME/.zsh_history" "$HOME/.bash_history"; do
+            [ -n "$_bcd_shf" ] && [ -f "$_bcd_shf" ] || continue
+            # strip zsh extended-history prefixes; keep cd /abs and cd ~/…;
+            # newest first (awk reverse — tac/tail -r aren't both portable)
+            _bcd_sd="$(sed -e 's/^: [0-9]*:[0-9]*;//' "$_bcd_shf" 2>/dev/null \
+                | grep -E '^[[:space:]]*cd[[:space:]]+["'\'']?(/|~)' \
+                | sed -e 's/^[[:space:]]*cd[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' \
+                      -e "s|^~|$HOME|" \
+                | tail -50 \
+                | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--)print a[i]}')"
+            [ -n "$_bcd_sd" ] && break
+        done
+    fi
+    [ -n "$_bcd_sd" ] || return 0
+    # append AFTER live-session recents: the backlog never outranks what the
+    # user actually did just now; menu-time -d checks drop dead entries
+    _BETTERCD_RECENT="${_BETTERCD_RECENT-}
+$_bcd_sd"
+    return 0
+}
+
 # Entry point: build the list (OLDPWD first + deduped recent, cap 8), or fall
 # back to a silent classic toggle when there's nothing worth a menu.
 __bettercd_magic_menu() { # $1 = "forced" when the user explicitly asked (cd --)
     __bettercd_tty_ok || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
+    __bettercd_seed_recent
     _bcd_mm_list=""; _bcd_mm_n=0
     if [ -n "${OLDPWD-}" ] && [ -d "$OLDPWD" ]; then
         _bcd_mm_list="$OLDPWD
@@ -703,7 +739,9 @@ cd() {
             case "$_bcd_now" in
                 ''|*[!0-9]*) ;;                  # no clock → classic
                 *)
-                    if __bettercd_interactive; then
+                    # auto-magic is OPT-IN (bettercd magic on); default keeps
+                    # cd - exactly classic — cd -- is the dropdown's home
+                    if [ "${BETTERCD_MAGIC-0}" = 1 ] && __bettercd_interactive; then
                         __bettercd_dash_mode "$_bcd_now"
                         if [ "$_bcd_dash_mode" = magic ]; then
                             __bettercd_magic_menu
@@ -714,8 +752,9 @@ cd() {
             __bettercd_delegate "$@" && __bettercd_clear_miss
             return $? ;;
         -- )
-            # `cd --` opens the dropdown directly (interactive, magic not off).
-            if __bettercd_interactive && [ "${BETTERCD_MAGIC-1}" != 0 ]; then
+            # `cd --` opens the dropdown directly — explicit invocation is
+            # consent, independent of the auto-magic setting.
+            if __bettercd_interactive; then
                 __bettercd_dash_arm "$(date +%s 2>/dev/null)"
                 __bettercd_magic_menu forced
                 return $?
@@ -908,7 +947,7 @@ __bettercd_help() {
         "cd <typo>"      "close-match sibling? → did-you-mean before mkdir" \
         "cd <file>:42:7" "editor/stack-trace paste → cd to the file's dir" \
         "cd <file>"      "jump to the file's parent directory" \
-        "cd -"           "toggle; twice in 60s → ✻ dropdown (5-min mode)" \
+        "cd -"           "classic toggle (magic on: twice → ✻ dropdown)" \
         "cd --"          "always open the ✻ recent-places dropdown" \
         "builtin cd -"   "always the classic toggle (bypasses bettercd)"
     printf "\n  ${_bh_S}COMMANDS${_bh_R}\n"
@@ -930,7 +969,7 @@ __bettercd_help() {
         "BETTERCD_HISTORY_HINT=0" "don't push undo-cd into history after a create" \
         "BETTERCD_SPARKLE_GLYPHS" "space-separated sparkle glyph frames" \
         "BETTERCD_SPARKLE_COLORS" "space-separated 256-color codes" \
-        "BETTERCD_MAGIC=0"        "disable the cd - recent-places dropdown" \
+        "BETTERCD_MAGIC=1"        "opt-in: cd - twice also opens the dropdown" \
         "BETTERCD_MAGIC_WINDOW=600" "seconds the dropdown stays armed (default 300)"
     printf "\n  ${_bh_S}EXAMPLE${_bh_R}\n"
     printf "    ${_bh_G}\$ cd projects/newapp/src${_bh_R}       ${_bh_D}# doesn't exist yet — now it does, you're in it${_bh_R}\n"
@@ -1006,7 +1045,7 @@ __bettercd_magic_cmd() {
 __bettercd_magic_status() {
     _bcd_gs_win="$(__bettercd_magic_window)"
     printf 'bettercd magic cd -\n'
-    printf '  mode:          %s\n' "$([ "${BETTERCD_MAGIC-1}" = 0 ] && echo off || echo auto)"
+    printf '  mode:          %s\n' "$([ "${BETTERCD_MAGIC-0}" = 1 ] && echo auto || echo 'off (default) — cd - classic; cd -- opens the dropdown')"
     printf '  window:        %ss (%s min)\n' "$_bcd_gs_win" "$(( _bcd_gs_win / 60 ))"
     _bcd_gs_now="$(date +%s 2>/dev/null)"
     case "$_bcd_gs_now" in

@@ -299,6 +299,13 @@ unset BETTERCD_MAGIC BETTERCD_MAGIC_WINDOW _BETTERCD_FORCE_INTERACTIVE
 # NB: __bettercd_dash_mode sets $_bcd_dash_mode and mutates state IN THE CURRENT
 # shell — call it directly, never via $(...) (a subshell would drop the state).
 
+# default is OPT-IN now: without BETTERCD_MAGIC=1 every dash is classic
+_BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
+__bettercd_dash_mode 1000; d1="$_bcd_dash_mode"
+__bettercd_dash_mode 1010; d2="$_bcd_dash_mode"
+[ "$d1" = classic ] && [ "$d2" = classic ]; check "magic: default (unset) is always classic" $?
+BETTERCD_MAGIC=1   # the state-machine tests below exercise the opt-in mode
+
 # 24a. fresh state → first dash is classic
 _BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
 __bettercd_dash_mode 1000; [ "$_bcd_dash_mode" = classic ]; check "magic: first dash is classic" $?
@@ -323,14 +330,14 @@ BETTERCD_MAGIC=0; _BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
 __bettercd_dash_mode 1000; c1="$_bcd_dash_mode"
 __bettercd_dash_mode 1010; c2="$_bcd_dash_mode"
 [ "$c1" = classic ] && [ "$c2" = classic ]; check "magic: BETTERCD_MAGIC=0 forces classic" $?
-unset BETTERCD_MAGIC
+BETTERCD_MAGIC=1
 
 # 24g. window override respected (600s)
 BETTERCD_MAGIC_WINDOW=600; _BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
 __bettercd_dash_mode 2000   # classic, arms LAST_DASH
 __bettercd_dash_mode 2030   # magic → UNTIL = 2030+600
 [ "$_BETTERCD_MAGIC_UNTIL" = 2630 ]; check "magic: window override respected" $?
-unset BETTERCD_MAGIC_WINDOW; _BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
+unset BETTERCD_MAGIC_WINDOW BETTERCD_MAGIC; _BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
 
 # 24h. CLI sets vars correctly + validates
 bettercd magic off >/dev/null;      [ "$BETTERCD_MAGIC" = 0 ];        check "magic cmd: off sets var" $?
@@ -390,6 +397,35 @@ $_BETTERCD_INOS"
     [ $rc -ne 0 ] && ! grep -q "does not exist there anymore" "$TMP/.vanerr"
     check "vanished: non-interactive keeps stock error" $?
     cd "$TMP"
+fi
+
+# 26. one-time history backlog seed (fallback path; zoxide absent in suite env)
+if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ] && ! command -v zoxide >/dev/null 2>&1; then
+    mkdir -p "$TMP/seedhome/projA" "$TMP/seedhome/projB"
+    HISTFILE="$TMP/.fakehist"
+    {
+        printf ': 1700000001:0;cd %s/seedhome/projA\n' "$TMP"
+        printf 'ls -la\n'
+        printf ': 1700000002:0;cd relative-skipped\n'
+        printf 'cd %s/seedhome/projB\n' "$TMP"
+    } > "$HISTFILE"
+    _BETTERCD_SEEDED=""; _BETTERCD_RECENT=""
+    __bettercd_seed_recent
+    case "$_BETTERCD_RECENT" in
+        *"$TMP/seedhome/projB"*"$TMP/seedhome/projA"*) ok ;;   # newest first
+        *) bad "seed: history backlog absolute cds, newest first" ;;
+    esac
+    case "$_BETTERCD_RECENT" in
+        *relative-skipped*) bad "seed: relative cd entries skipped" ;;
+        *) ok ;;
+    esac
+    __bettercd_seed_recent   # second call: no duplicate growth
+    before_len=${#_BETTERCD_RECENT}
+    __bettercd_seed_recent
+    [ "${#_BETTERCD_RECENT}" -eq "$before_len" ]; check "seed: one-time only" $?
+    unset HISTFILE; _BETTERCD_SEEDED=""; _BETTERCD_RECENT=""
+elif command -v zoxide >/dev/null 2>&1; then
+    printf 'skip: zoxide present — history-fallback seed path not exercised here\n'
 fi
 
 # --- results -----------------------------------------------------------------
