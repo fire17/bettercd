@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.1 — 2026-07-10
+
+- Lint: simplify a typo-guard test that newer shellcheck (CI) flags as SC2015;
+  behavior identical. (macOS tests were green; ubuntu failed at the lint step.)
+
+
 ## v0.3.0 — 2026-07-10
 
 - **Typo guard** — before auto-creating under cwd, an interactive `cd` checks

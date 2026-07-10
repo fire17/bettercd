@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.3.0"
+BETTERCD_VERSION="0.3.1"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -175,7 +175,7 @@ __bettercd_typo_guard() { # $1 = normalized (absolute) target
     # nothing, which would abort the guard and block the create.
     _bcd_gents="$(find "$_bcd_gparent" -mindepth 1 -maxdepth 1 2>/dev/null)"
     while IFS= read -r _bcd_ge; do
-        [ -n "$_bcd_ge" ] && [ -d "$_bcd_ge" ] || continue
+        [ -d "$_bcd_ge" ] || continue   # empty lines fail -d too
         _bcd_gn="${_bcd_ge##*/}"
         [ "$_bcd_gn" = "$_bcd_gbase" ] && continue
         _bcd_gnl="$(printf '%s' "$_bcd_gn" | tr '[:upper:]' '[:lower:]')"
