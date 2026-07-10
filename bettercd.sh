@@ -1900,6 +1900,35 @@ cd() {
         --help | -h )
             __bettercd_help
             return 0 ;;
+        --version )
+            printf 'bettercd %s\n' "$BETTERCD_VERSION"
+            return 0 ;;
+        --status )   bettercd status;  return $? ;;
+        --undo )     bettercd undo;    return $? ;;
+        --doctor )   bettercd doctor;  return $? ;;
+        --backup )   bettercd backup;  return $? ;;
+        --places )   bettercd places;  return $? ;;
+        --magic )    bettercd magic status; return $? ;;
+        --update )   bettercd update;  return $? ;;
+        --config | --prefs ) bettercd config; return $? ;;
+        --* )
+            # unknown long flag: never a dir, never a raw builtin error
+            if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+                printf '\033[38;5;213m✻\033[0m \033[2munknown flag\033[0m \033[1;36m%s\033[0m \033[2m— try\033[0m \033[1mcd --help\033[0m\n' "$1" >&2
+            else
+                printf 'bettercd: unknown flag %s — try cd --help\n' "$1" >&2
+            fi
+            return 1 ;;
+        ... | ....* )
+            # dot-runs WITH a space (the aliases only catch cd..): cd ... = up 2
+            case "$1" in *[!.]*) ;; *)
+                _bcd_dots=${#1}; _bcd_dt=".."
+                while [ "$_bcd_dots" -gt 2 ]; do _bcd_dt="$_bcd_dt/.."; _bcd_dots=$((_bcd_dots - 1)); done
+                __bettercd_delegate "$_bcd_dt" && __bettercd_clear_miss
+                return $?
+            esac
+            __bettercd_delegate "$@" && __bettercd_clear_miss
+            return $? ;;
         -* | +* )
             # flags (-P/-L/-e/…) and zsh dir-stack refs (+2/-2): builtin semantics
             __bettercd_cd "$@" && __bettercd_clear_miss
@@ -2076,6 +2105,8 @@ bettercd() {
         doctor)  shift; __bettercd_doctor "$@" ;;
         backup)  __bettercd_backup ;;
         magic)   shift; __bettercd_magic_cmd "$@" ;;
+        update)  __bettercd_update ;;
+        config|prefs) __bettercd_config ;;
         places)  shift; __bettercd_places "$@" ;;
         status)  __bettercd_status ;;
         version|--version|-v) printf 'bettercd %s\n' "$BETTERCD_VERSION" ;;
@@ -2083,6 +2114,39 @@ bettercd() {
         *) printf 'bettercd: unknown command: %s (try: bettercd help)\n' "$1" >&2
            return 1 ;;
     esac
+}
+
+# force the autoreload check right now (cd --update)
+__bettercd_update() {
+    _bcd_upv="$BETTERCD_VERSION"
+    if __bettercd_reload_check; then
+        return 0   # reload_check already announced the new version
+    fi
+    if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+        printf '\033[38;5;213m✻\033[0m \033[2malready fresh —\033[0m \033[1;36m%s\033[0m\n' "$_bcd_upv" >&2
+    else
+        printf 'bettercd: already fresh — %s\n' "$_bcd_upv" >&2
+    fi
+    return 0
+}
+
+# where everything lives (cd --config)
+__bettercd_config() {
+    _bcf_d="${XDG_CONFIG_HOME:-$HOME/.config}/bettercd"
+    if [ -t 1 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+        printf '\033[38;5;213m✻\033[0m \033[1mbettercd config\033[0m\n'
+        printf '  \033[1;36m%-11s\033[0m \033[2m%s\033[0m\n' \
+            "source"  "${_BETTERCD_SRC:-unknown}" \
+            "prefs"   "$_bcf_d/prefs" \
+            "pins"    "$_bcf_d/pins" \
+            "stamp"   "$_bcf_d/.loaded" \
+            "backups" "$_bcf_d/backups/"
+        [ -f "$_bcf_d/prefs" ] && { printf '  \033[2mprefs now:\033[0m '; tr '\n' ' ' < "$_bcf_d/prefs"; printf '\n'; }
+    else
+        printf 'bettercd config\n  source  %s\n  prefs   %s\n  pins    %s\n  stamp   %s\n' \
+            "${_BETTERCD_SRC:-unknown}" "$_bcf_d/prefs" "$_bcf_d/pins" "$_bcf_d/.loaded"
+    fi
+    return 0
 }
 
 __bettercd_help() {
@@ -2175,15 +2239,34 @@ __BCD_EOF__
 }
 
 __bettercd_status() {
-    printf 'bettercd %s\n' "$BETTERCD_VERSION"
-    printf '  cd mode:      %s\n' "$_BETTERCD_MODE"
-    if [ -n "${_BETTERCD_UNDO_CREATED-}" ]; then
-        printf '  pending undo: %s (from %s)\n' "$_BETTERCD_UNDO_TARGET" "$_BETTERCD_UNDO_FROM"
+    if [ -t 1 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+        _bst_A='\033[38;5;213m' _bst_C='\033[1;36m' _bst_G='\033[32m' _bst_D='\033[2m' _bst_R='\033[0m'
     else
-        printf '  pending undo: none\n'
+        _bst_A='' _bst_C='' _bst_G='' _bst_D='' _bst_R=''
     fi
-    printf '  auto-create:  %s\n' "$([ "${BETTERCD_AUTO_CREATE-1}" = 0 ] && echo off || echo on)"
+    printf "${_bst_A}✻${_bst_R} ${_bst_C}bettercd ${BETTERCD_VERSION}${_bst_R}\n"
+    printf "  ${_bst_D}%-13s${_bst_R} %s\n" "cd mode" "$_BETTERCD_MODE"
+    if [ -n "${_BETTERCD_UNDO_CREATED-}" ]; then
+        printf "  ${_bst_D}%-13s${_bst_R} %s ${_bst_D}(from %s)${_bst_R}\n" "pending undo" "$_BETTERCD_UNDO_TARGET" "$_BETTERCD_UNDO_FROM"
+    else
+        printf "  ${_bst_D}%-13s${_bst_R} none\n" "pending undo"
+    fi
+    printf "  ${_bst_D}%-13s${_bst_R} %s\n" "auto-create" "$([ "${BETTERCD_AUTO_CREATE-1}" = 0 ] && echo off || echo on)"
+    printf "  ${_bst_D}%-13s${_bst_R} %s\n" "autoreload" "$([ "${BETTERCD_AUTORELOAD-1}" = 0 ] && echo off || echo "${_bst_G}on${_bst_R} (fork-free)")"
+    printf "  ${_bst_D}%-13s${_bst_R} %s\n" "magic cd -" "$([ "${BETTERCD_MAGIC-0}" = 1 ] && echo auto || echo 'off (cd -- opens the dropdown)')"
+    _bst_pins=0
+    _bst_pf="${XDG_CONFIG_HOME:-$HOME/.config}/bettercd/pins"
+    if [ -f "$_bst_pf" ]; then
+        while IFS= read -r _bst_l; do [ -n "$_bst_l" ] && _bst_pins=$((_bst_pins + 1)); done < "$_bst_pf"
+    fi
+    printf "  ${_bst_D}%-13s${_bst_R} %s\n" "pins" "$_bst_pins"
+    _bst_rec=0
+    while IFS= read -r _bst_l; do [ -n "$_bst_l" ] && _bst_rec=$((_bst_rec + 1)); done <<__BCD_EOF__
+${_BETTERCD_RECENT-}
+__BCD_EOF__
+    printf "  ${_bst_D}%-13s${_bst_R} %s tracked this session ${_bst_D}(cd -- for the full pool)${_bst_R}\n" "places" "$_bst_rec"
 }
+
 
 # bettercd magic on|off|status|window <minutes> — bettercd is a function, so a
 # plain assignment sets the var in the CURRENT shell. Export in your rc to

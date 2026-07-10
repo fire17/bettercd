@@ -2,6 +2,14 @@
 
 ## Unreleased (v0.12.0)
 
+- Full long-flag surface for cd: --status --version --undo --doctor --backup
+  --places --magic --update --config all route to their features; unknown
+  --flags get a ✻ one-liner + --help hint (and can never create a directory).
+  Real cd flags (-P/-L/-e, +N stack refs) pass through untouched. bettercd
+  status restyled in-brand (mode, undo, autoreload, magic, pins, places);
+  new bettercd update (force the freshness check) + bettercd config (where
+  everything lives). Spaced dot-runs: cd ... goes up two (was a create-trap).
+
 - `cd --help` (and -h) now prints an awesome-readme-grade help page — box-art
   banner in brand gradient, THE MOVES / THE DROPDOWN / SELF-CARE / SAFETY / ENV
   sections, glyph legend, receipts footer. `bettercd help` = same page. Plain

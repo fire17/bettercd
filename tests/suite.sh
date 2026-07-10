@@ -632,6 +632,23 @@ out="$(cd --help 2>&1)"; rc=$?
 [ $rc -eq 0 ] && printf '%s' "$out" | grep -q 'a better cd' && printf '%s' "$out" | grep -q 'THE DROPDOWN'
 check "cd --help prints the big help" $?
 
+# 30. long-flag surface: every cd --X routes, unknown flags never create dirs
+cd "$TMP"
+cd --version 2>/dev/null | grep -q "bettercd"; check "cd --version" $?
+cd --status  2>/dev/null | grep -q "cd mode"; check "cd --status" $?
+cd --config  2>/dev/null | grep -q "prefs"; check "cd --config" $?
+cd --update  >/dev/null 2>&1; check "cd --update exits 0" $?
+out="$(cd --frobnicate 2>&1)"; rc=$?
+[ $rc -ne 0 ] && printf '%s' "$out" | grep -q "unknown flag" && [ ! -d "$TMP/--frobnicate" ]
+check "unknown --flag: message, rc 1, NO dir created" $?
+
+# 31. spaced dot-runs: cd ... goes up two (never creates a dir named ...)
+mkdir -p "$TMP/dots/a/b" && cd "$TMP/dots/a/b"
+cd ... 2>/dev/null
+[ "$PWD" = "$TMP/dots" ] && [ ! -d "$TMP/dots/a/b/..." ]
+check "cd ... (spaced) goes up two" $?
+cd "$TMP"
+
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
 rm -rf "$TMP"
