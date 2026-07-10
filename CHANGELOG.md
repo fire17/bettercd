@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.2.0 — 2026-07-09
+
+- ✨ Sparkle announce: in interactive terminals the create message is now one
+  line — `+ auto created & cd to <path> - if you did not mean this - please
+  run undo-cd to revert this action` — and its leading `+` sparkles through
+  unicode glyphs for ~2s (Claude-Code-style) *after* the prompt is back,
+  fully non-blocking. Anchored by CSI 6n cursor report, drawn by a detached
+  animator around cursor save/restore; prompt hooks (zsh precmd/preexec,
+  bash PROMPT_COMMAND) kill it the moment anything would scroll. Announce is
+  deferred to precmd so compound commands (`cd x && make`) anchor exactly,
+  even at the bottom of the screen and under multi-line prompts.
+- `undo-cd` — new top-level alias for `bettercd undo`.
+- `BETTERCD_SPARKLE=0` disables the animation; scripts / non-tty shells keep
+  the plain static two-line message (undo one-liner intact).
+
 ## v0.1.1 — 2026-07-06
 
 - Silence zoxide's doctor false positive: zoxide ≥0.9.7 warns when anything

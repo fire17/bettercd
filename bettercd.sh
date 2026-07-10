@@ -13,7 +13,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.1.1"
+BETTERCD_VERSION="0.2.0"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -107,6 +107,125 @@ __bettercd_interactive() {
 
 __bettercd_clear_miss() { _BETTERCD_LAST_MISS=""; }
 
+# --- sparkle: animated inline "+" on the create-info line ---------------------
+# Interactive terminals get a one-line announcement whose leading "+" keeps
+# sparkling for ~2s AFTER the prompt is back (Claude-Code-style churn glyphs).
+# The create only sets a pending flag; the precmd hook prints the line right
+# before the prompt draws — after ALL command output — so its absolute row
+# (CSI 6n cursor report) is exact. A detached animator then redraws that one
+# cell around cursor save/restore, so typing is untouched, and the hooks kill
+# it the moment anything would scroll the screen.
+# Scripts / non-tty / BETTERCD_SPARKLE=0 keep the plain static messages.
+
+__bettercd_fancy() {
+    [ "${BETTERCD_SPARKLE-1}" != 0 ] || return 1
+    [ -t 2 ] || return 1
+    [ "${TERM-}" != dumb ] || return 1
+    [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ] || return 1
+    case "${LC_ALL:-${LC_CTYPE:-${LANG-}}}" in
+        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ;;
+        *) return 1 ;;
+    esac
+    ( : </dev/tty ) 2>/dev/null
+}
+
+# Ask the terminal where the cursor is; sets _bcd_crow/_bcd_ccol. Any typed-
+# ahead input the query swallows is pushed back into zsh's editor (print -z).
+__bettercd_cursor_pos() {
+    _bcd_ost="$(command stty -g </dev/tty 2>/dev/null)" || return 1
+    [ -n "$_bcd_ost" ] || return 1
+    command stty raw -echo min 0 time 5 </dev/tty 2>/dev/null || return 1
+    printf '\033[6n' >/dev/tty
+    _bcd_rep=""
+    # shellcheck disable=SC3045,SC2034  # read -d: only reached in bash/zsh (fancy gate)
+    IFS= read -r -d R _bcd_rep </dev/tty 2>/dev/null
+    command stty "$_bcd_ost" </dev/tty 2>/dev/null
+    _bcd_esc="$(printf '\033')"
+    _bcd_pre="${_bcd_rep%%"$_bcd_esc"*}"
+    if [ -n "$_bcd_pre" ] && [ -n "${ZSH_VERSION-}" ]; then
+        print -z -- "$_bcd_pre" 2>/dev/null
+    fi
+    _bcd_rep="${_bcd_rep##*\[}"
+    _bcd_crow="${_bcd_rep%%;*}"
+    _bcd_ccol="${_bcd_rep##*;}"
+    case "$_bcd_crow" in ''|*[!0-9]*) return 1 ;; esac
+    case "$_bcd_ccol" in ''|*[!0-9]*) _bcd_ccol=1 ;; esac
+    return 0
+}
+
+__bettercd_anim() { # $1 = absolute row of the glyph cell; writes to /dev/tty
+    _bcd_i=0
+    while [ "$_bcd_i" -lt 16 ]; do   # 16 frames x 0.12s ≈ 2s
+        for _bcd_g in '✢' '✳' '✶' '✻' '✽' '✻' '✶' '✳'; do
+            case $((_bcd_i % 4)) in
+                0) _bcd_c='38;5;213' ;; 1) _bcd_c='38;5;219' ;;
+                2) _bcd_c='38;5;177' ;; 3) _bcd_c='38;5;225' ;;
+            esac
+            # sleep first: the anchor pre-compensates the prompt's scroll,
+            # so give the prompt one frame to actually draw
+            command sleep 0.12
+            printf '\0337\033[%s;1H\033[%sm%s\033[0m\0338' "$1" "$_bcd_c" "$_bcd_g"
+            _bcd_i=$((_bcd_i + 1))
+        done
+    done
+    printf '\0337\033[%s;1H\033[1;32m+\033[0m\0338' "$1"
+}
+
+__bettercd_anim_kill() {
+    [ -n "${_BETTERCD_ANIM_PID-}" ] || return 0
+    # command: users override kill (e.g. kill-by-port wrappers) — bypass them
+    command kill "$_BETTERCD_ANIM_PID" 2>/dev/null
+    _BETTERCD_ANIM_PID=""
+    return 0
+}
+
+__bettercd_sparkline() { # $1 = created target — the colored one-liner
+    printf '\033[1;32m+\033[0m auto created & cd to \033[1;36m%s\033[0m \033[2m- if you did not mean this - please run \033[0m\033[1mundo-cd\033[0m\033[2m to revert this action\033[0m\n' "$1" >&2
+}
+
+# Runs right before every prompt. A pending create prints its line here —
+# after all command output, so the glyph row can be computed exactly, even
+# at the bottom of the screen. Any prompt after that means a scroll: kill.
+__bettercd_anim_precmd() {
+    __bettercd_anim_kill
+    [ -n "${_BETTERCD_ANIM_PENDING-}" ] || return 0
+    _bcd_t="$_BETTERCD_ANIM_PENDING"
+    _BETTERCD_ANIM_PENDING=""
+    if ! __bettercd_cursor_pos; then
+        __bettercd_sparkline "$_bcd_t"   # no cursor report: static line, no anim
+        return 0
+    fi
+    _bcd_start="$_bcd_crow"
+    if [ "$_bcd_ccol" -gt 1 ]; then     # finish a partial output line first
+        printf '\n' >&2
+        _bcd_start=$((_bcd_start + 1))
+    fi
+    __bettercd_sparkline "$_bcd_t"
+    _bcd_plain="+ auto created & cd to $_bcd_t - if you did not mean this - please run undo-cd to revert this action"
+    _bcd_rows=$(( (${#_bcd_plain} - 1) / ${COLUMNS:-80} + 1 ))
+    # ponytail: bash prompts assumed 1 line; zsh counts expanded PS1 lines
+    _bcd_pl=1
+    if [ -n "${ZSH_VERSION-}" ]; then
+        # two-step: forces array context so ${#…} counts lines, not chars
+        eval '_bcd_pla=("${(@f)${(%%)PS1}}"); _bcd_pl=${#_bcd_pla}; unset _bcd_pla' 2>/dev/null
+    fi
+    case "$_bcd_pl" in ''|*[!0-9]*) _bcd_pl=1 ;; esac
+    _bcd_anchor="$_bcd_start"
+    if [ "${LINES:-0}" -gt 0 ]; then
+        _bcd_scr=$(( _bcd_start + _bcd_rows - LINES ))      # scroll printing the line causes
+        [ "$_bcd_scr" -gt 0 ] || _bcd_scr=0
+        _bcd_cur=$(( _bcd_start + _bcd_rows ))              # cursor row after the line
+        [ "$_bcd_cur" -le "$LINES" ] || _bcd_cur="$LINES"
+        _bcd_over=$(( _bcd_cur + _bcd_pl - 1 - LINES ))     # scroll the prompt will cause
+        [ "$_bcd_over" -gt 0 ] || _bcd_over=0
+        _bcd_anchor=$(( _bcd_start - _bcd_scr - _bcd_over ))
+    fi
+    [ "$_bcd_anchor" -ge 1 ] || return 0
+    # detached via nested subshell: no job-control noise, no wait on exit
+    _BETTERCD_ANIM_PID="$( ( __bettercd_anim "$_bcd_anchor" </dev/null >/dev/tty 2>/dev/null & printf '%s' $! ) )"
+    return 0
+}
+
 # mkdir -p the target, cd into it, remember exactly what we created.
 __bettercd_create_and_cd() {
     _bcd_target="$1"
@@ -139,6 +258,11 @@ __bettercd_create_and_cd() {
     _BETTERCD_UNDO_TARGET="$_bcd_target"
     __bettercd_clear_miss
     if [ "${BETTERCD_QUIET-0}" != 1 ]; then
+        if __bettercd_fancy; then
+            # announced by the precmd hook, after all command output
+            _BETTERCD_ANIM_PENDING="$_bcd_target"
+            return 0
+        fi
         _bcd_n=0
         while IFS= read -r _bcd_line; do
             [ -n "$_bcd_line" ] && _bcd_n=$((_bcd_n + 1))
@@ -241,6 +365,32 @@ cd() {
     return 1
 }
 
+# undo-cd — what the sparkle line tells you to run (hyphenated names need
+# bash/zsh, hence the eval; plain sh keeps `bettercd undo`)
+if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
+    eval 'undo-cd() { bettercd undo; }'
+fi
+
+# prompt hooks that stop the sparkle animator once the screen scrolls
+if [ -n "${ZSH_VERSION-}" ]; then
+    eval 'typeset -ga precmd_functions preexec_functions
+    (( ${precmd_functions[(Ie)__bettercd_anim_precmd]} )) ||
+        precmd_functions+=(__bettercd_anim_precmd)
+    (( ${preexec_functions[(Ie)__bettercd_anim_kill]} )) ||
+        preexec_functions+=(__bettercd_anim_kill)'
+elif [ -n "${BASH_VERSION-}" ]; then
+    case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
+        "declare -a"*) eval 'case " ${PROMPT_COMMAND[*]} " in
+                *__bettercd_anim_precmd*) ;;
+                *) PROMPT_COMMAND+=(__bettercd_anim_precmd) ;;
+            esac' ;;
+        *) case ";${PROMPT_COMMAND-};" in
+               *__bettercd_anim_precmd*) ;;
+               *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__bettercd_anim_precmd" ;;
+           esac ;;
+    esac
+fi
+
 # --- the bettercd command ----------------------------------------------------
 bettercd() {
     case "${1-}" in
@@ -266,6 +416,7 @@ bettercd — a better cd: zoxide-aware, auto-mkdir, with undo.
   cd <file>            jumps to the file's parent directory
 
   bettercd undo        go back + remove the dirs the last cd created (rmdir only)
+  undo-cd              same as `bettercd undo` (what the create line suggests)
   bettercd doctor      check zoxide / fzf / cd-ownership; --fix to install
   bettercd backup      snapshot your current cd paradigm + how to restore it
   bettercd status      show mode, pending undo, version
@@ -273,6 +424,7 @@ bettercd — a better cd: zoxide-aware, auto-mkdir, with undo.
 
   env: BETTERCD_AUTO_CREATE=0  disable auto-create
        BETTERCD_QUIET=1        suppress hints
+       BETTERCD_SPARKLE=0      disable the animated create line
 __BCD_EOF__
 }
 
@@ -297,9 +449,12 @@ __BCD_EOF__
     if [ ! -d "$_BETTERCD_UNDO_TARGET" ] && command -v zoxide >/dev/null 2>&1; then
         command zoxide remove "$_BETTERCD_UNDO_TARGET" 2>/dev/null
     fi
-    printf 'bettercd: back in %s — removed %s dir(s)' "$PWD" "$_bcd_removed" >&2
-    if [ -n "$_bcd_kept" ]; then
-        printf '; kept (not empty):%s' "$_bcd_kept" >&2
+    if __bettercd_fancy; then
+        printf '\033[1;33m↩\033[0m back in \033[1;36m%s\033[0m \033[2m-\033[0m removed \033[1;32m%s\033[0m dir(s)' "$PWD" "$_bcd_removed" >&2
+        [ -n "$_bcd_kept" ] && printf '\033[2m; kept (not empty):\033[0m\033[1;33m%s\033[0m' "$_bcd_kept" >&2
+    else
+        printf 'bettercd: back in %s — removed %s dir(s)' "$PWD" "$_bcd_removed" >&2
+        [ -n "$_bcd_kept" ] && printf '; kept (not empty):%s' "$_bcd_kept" >&2
     fi
     printf '\n' >&2
     _BETTERCD_UNDO_FROM="" _BETTERCD_UNDO_CREATED="" _BETTERCD_UNDO_TARGET=""

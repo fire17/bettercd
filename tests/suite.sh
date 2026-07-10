@@ -47,6 +47,11 @@ grep -q "bettercd undo" "$TMP/.err"; check "hint shows undo" $?
 bettercd undo 2>/dev/null
 [ "$PWD" = "$TMP" ] && [ ! -d "$TMP/newdir" ]; check "undo removes created dir and returns" $?
 
+# 5b. undo-cd alias (what the interactive create line suggests)
+cd undotest 2>/dev/null
+undo-cd 2>/dev/null
+[ "$PWD" = "$TMP" ] && [ ! -d "$TMP/undotest" ]; check "undo-cd reverts create" $?
+
 # 6. auto-create nested chain
 cd a/b/c 2>/dev/null
 [ "$PWD" = "$TMP/a/b/c" ]; check "auto-create nested chain" $?

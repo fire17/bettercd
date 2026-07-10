@@ -6,8 +6,7 @@
 
 ```console
 $ cd projects/newapp/src        # …doesn't exist yet
-bettercd: created 3 new dir(s) → /home/you/projects/newapp/src
-          undo: bettercd undo    (or: cd '/home/you' && rmdir …)
++ auto created & cd to /home/you/projects/newapp/src - if you did not mean this - please run undo-cd to revert this action
 
 $ cd proj                       # exists in your zoxide history
 /home/you/projects/newapp       # fuzzy jump, exactly like before
@@ -21,8 +20,8 @@ bettercd: create /etc/nope ? [y/N]
 
 ## What it does
 
-- **`cd` into a directory that doesn't exist, under your cwd → it's created** (`mkdir -p`) and you're in it — with a printed one-liner to undo everything.
-- **`bettercd undo`** — go back where you were and remove *exactly* the directories that were created (uses `rmdir` only: anything that gained content is kept, never deleted).
+- **`cd` into a directory that doesn't exist, under your cwd → it's created** (`mkdir -p`) and you're in it — announced by a one-liner whose leading `+` **sparkles through unicode glyphs for ~2s** (Claude-Code-style), *after* your prompt is already back. Fully non-blocking: a detached animator redraws just that one cell (cursor save/restore around an absolute-row anchor) and prompt hooks kill it the instant anything would scroll. Scripts and non-tty shells get the plain static message instead.
+- **`undo-cd`** (or `bettercd undo`) — go back where you were and remove *exactly* the directories that were created (uses `rmdir` only: anything that gained content is kept, never deleted).
 - **Outside your cwd → never silently created.** First attempt fails with a hint; an immediate identical retry asks `[y/N]`. Scripts and non-interactive shells never get prompts and never get surprise directories.
 - **Composes with [zoxide](https://github.com/ajeetdsouza/zoxide), never fights it.** If your `cd` is zoxide-powered (`zoxide init --cmd cd`), fuzzy jumps still win for bare names. A **trailing slash forces creation**: `cd newdir/` means "make it *here*", skipping the fuzzy match.
 - **`cd some/file.txt` → jumps to the file's parent directory** instead of erroring.
@@ -76,7 +75,7 @@ Auto-creating directories on `cd` is a footgun if done naively. The rules that k
 | Undo + zoxide | the created dir is also removed from the zoxide database |
 | Your old `cd` | detected at load (zoxide / custom function / builtin) and delegated to — never clobbered |
 
-Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_QUIET=1` (no hints), `builtin cd` / `command cd` (bypass entirely).
+Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_QUIET=1` (no hints), `BETTERCD_SPARKLE=0` (no animation), `builtin cd` / `command cd` (bypass entirely).
 
 ## Performance
 
@@ -92,7 +91,8 @@ wrapper: 36.9µs per cd   builtin: 11.7µs per cd   overhead: ~25µs
 
 ```
 cd <dir>              everything above
-bettercd undo         revert the last auto-create (go back + rmdir created chain)
+undo-cd               revert the last auto-create (go back + rmdir created chain)
+bettercd undo         same thing, spelled out
 bettercd doctor       health-check zoxide / fzf / load order   (--fix to install)
 bettercd backup       snapshot current cd setup + RESTORE.md
 bettercd status       mode, pending undo, version
@@ -100,6 +100,7 @@ cdi <query>           interactive fuzzy cd (zoxide + fzf)
 
 BETTERCD_AUTO_CREATE=0    disable auto-create
 BETTERCD_QUIET=1          suppress hints
+BETTERCD_SPARKLE=0        disable the animated create line
 ```
 
 ## Uninstall / restore
