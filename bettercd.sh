@@ -13,7 +13,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.2.0"
+BETTERCD_VERSION="0.2.1"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -366,9 +366,14 @@ cd() {
 }
 
 # undo-cd — what the sparkle line tells you to run (hyphenated names need
-# bash/zsh, hence the eval; plain sh keeps `bettercd undo`)
+# bash/zsh, hence the eval; plain sh keeps `bettercd undo`; bash running AS
+# sh — posix mode, e.g. macOS /bin/sh — rejects hyphens, so skip there too)
 if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
-    eval 'undo-cd() { bettercd undo; }'
+    # shellcheck disable=SC3028  # SHELLOPTS: bash-only, harmlessly empty elsewhere
+    case ":${SHELLOPTS-}:" in
+        *:posix:*) ;;
+        *) eval 'undo-cd() { bettercd undo; }' ;;
+    esac
 fi
 
 # prompt hooks that stop the sparkle animator once the screen scrolls

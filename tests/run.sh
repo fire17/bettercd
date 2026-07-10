@@ -23,7 +23,9 @@ for shell in bash zsh; do
     done
 done
 
-# POSIX smoke test: bettercd must at least source + run under plain sh/dash
+# POSIX smoke test: bettercd must at least source + run under BOTH dash and
+# sh — on macOS sh is bash in posix mode, a different animal than dash
+# (v0.2.0 sourced fine under dash but broke under sh; test both, no break)
 for shell in dash sh; do
     if command -v "$shell" >/dev/null 2>&1; then
         ran=$((ran + 1))
@@ -33,7 +35,6 @@ for shell in dash sh; do
             failed=$((failed + 1))
             printf '>>> %s/smoke FAILED\n' "$shell" >&2
         fi
-        break
     fi
 done
 

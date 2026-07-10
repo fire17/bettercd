@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.1 — 2026-07-10
+
+- Fix: sourcing under bash-in-posix-mode `sh` (e.g. macOS `/bin/sh`) failed —
+  posix mode rejects the hyphenated `undo-cd` function name. Skipped there
+  (`bettercd undo` still works everywhere). Caught by the brew formula test.
+- Tests: the POSIX smoke now runs under BOTH dash and sh (the old `break`
+  tested only whichever existed first, which is how this slipped through).
+
 ## v0.2.0 — 2026-07-09
 
 - ✨ Sparkle announce: in interactive terminals the create message is now one
