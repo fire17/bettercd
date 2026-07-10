@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.1 — 2026-07-10
+
+- Lint: same SC2015 pattern the v0.3.1 patch fixed, reintroduced in the
+  history-seed code (newer shellcheck on CI flags it; macOS/local did not).
+  Behavior identical.
+
+
 ## v0.8.0 — 2026-07-10
 
 - `cd -` is exactly classic again BY DEFAULT — the auto-magic (second dash

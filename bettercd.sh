@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.8.0"
+BETTERCD_VERSION="0.8.1"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -656,7 +656,7 @@ __bettercd_seed_recent() {
     fi
     if [ -z "$_bcd_sd" ]; then
         for _bcd_shf in "${HISTFILE-}" "$HOME/.zsh_history" "$HOME/.bash_history"; do
-            [ -n "$_bcd_shf" ] && [ -f "$_bcd_shf" ] || continue
+            [ -f "$_bcd_shf" ] || continue   # empty var fails -f too
             # strip zsh extended-history prefixes; keep cd /abs and cd ~/…;
             # newest first (awk reverse — tac/tail -r aren't both portable)
             _bcd_sd="$(sed -e 's/^: [0-9]*:[0-9]*;//' "$_bcd_shf" 2>/dev/null \
