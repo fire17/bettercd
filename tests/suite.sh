@@ -627,6 +627,11 @@ if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
     unset _BETTERCD_FORCE_INTERACTIVE
 fi
 
+# 29. cd --help shows the big help, exits 0 (and never tries to cd)
+out="$(cd --help 2>&1)"; rc=$?
+[ $rc -eq 0 ] && printf '%s' "$out" | grep -q 'a better cd' && printf '%s' "$out" | grep -q 'THE DROPDOWN'
+check "cd --help prints the big help" $?
+
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
 rm -rf "$TMP"

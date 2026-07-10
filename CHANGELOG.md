@@ -2,6 +2,11 @@
 
 ## Unreleased (v0.12.0)
 
+- `cd --help` (and -h) now prints an awesome-readme-grade help page — box-art
+  banner in brand gradient, THE MOVES / THE DROPDOWN / SELF-CARE / SAFETY / ENV
+  sections, glyph legend, receipts footer. `bettercd help` = same page. Plain
+  text when piped/NO_COLOR.
+
 - SEAMLESS AUTORELOAD: every cd runs a zero-fork freshness check (builtin
   -nt stat + builtin stamp read vs ~/.config/bettercd/.loaded); an edited
   bettercd.sh is re-sourced automatically on your next cd — ✻ auto-updated

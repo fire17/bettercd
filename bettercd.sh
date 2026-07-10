@@ -1897,6 +1897,9 @@ cd() {
             fi
             __bettercd_delegate "$@" && __bettercd_clear_miss
             return $? ;;
+        --help | -h )
+            __bettercd_help
+            return 0 ;;
         -* | +* )
             # flags (-P/-L/-e/…) and zsh dir-stack refs (+2/-2): builtin semantics
             __bettercd_cd "$@" && __bettercd_clear_miss
@@ -2085,50 +2088,58 @@ bettercd() {
 __bettercd_help() {
     # colors only on a tty, honoring NO_COLOR; plain text everywhere else
     if [ -t 1 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
-        _bh_T='\033[1;33m' _bh_S='\033[1;34m' _bh_C='\033[1;36m' _bh_G='\033[32m' _bh_D='\033[2m' _bh_R='\033[0m'
+        _bh_A='\033[38;5;213m' _bh_B='\033[38;5;219m' _bh_P='\033[38;5;225m'
+        _bh_S='\033[1;34m' _bh_C='\033[1;36m' _bh_G='\033[32m' _bh_Y='\033[38;5;178m'
+        _bh_O='\033[38;5;208m' _bh_D='\033[2m' _bh_W='\033[1m' _bh_R='\033[0m'
     else
-        _bh_T='' _bh_S='' _bh_C='' _bh_G='' _bh_D='' _bh_R=''
+        _bh_A='' _bh_B='' _bh_P='' _bh_S='' _bh_C='' _bh_G='' _bh_Y='' _bh_O='' _bh_D='' _bh_W='' _bh_R=''
     fi
-    printf "\n  ${_bh_T}✻ bettercd ${BETTERCD_VERSION}${_bh_R} ${_bh_D}— a better cd: zoxide-aware, auto-mkdir, with undo${_bh_R}\n\n"
-    printf "  ${_bh_S}USAGE${_bh_R}\n"
-    printf "    ${_bh_C}%-22s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
-        "cd <existing>"  "plain cd (zoxide-aware, ~25µs, zero magic)" \
-        "cd <missing>"   "under cwd → mkdir -p + cd, ✻ sparkle + undo hint" \
-        ""               "elsewhere → fails once; repeat → [y/N] create" \
-        "cd <missing>/"  "trailing slash: always create (skips fuzzy jump)" \
-        "cd <typo>"      "close-match sibling? → did-you-mean before mkdir" \
-        "cd <file>:42:7" "editor/stack-trace paste → cd to the file's dir" \
-        "cd <file>"      "jump to the file's parent directory" \
-        "cd -"           "classic toggle (magic on: twice → ✻ dropdown)" \
-        "cd --"          "always open the ✻ recent-places dropdown" \
-        "builtin cd -"   "always the classic toggle (bypasses bettercd)"
-    printf "\n  ${_bh_S}COMMANDS${_bh_R}\n"
-    printf "    ${_bh_C}%-22s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
-        "undo-cd"          "go back + remove what the last cd created" \
-        "bettercd undo"    "same thing, spelled out (rmdir-only, never rm)" \
-        "bettercd doctor"  "check zoxide / fzf / load order (--fix installs)" \
-        "bettercd backup"  "snapshot your cd paradigm + RESTORE.md" \
-        "bettercd status"  "mode, pending undo, version" \
-        "bettercd magic"   "on|off|status|window <min> — the cd - dropdown" \
-        "bettercd places"  "list the recent-places pool (-n <k> limits)" \
-        "cd - (×2)"        "sparkling dropdown of recent places (cd -- forces it)" \
-        "cdi <query>"      "interactive fuzzy cd (zoxide + fzf)"
+    printf "\n"
+    printf "  ${_bh_A}┏┓ ┏━╸╺┳╸╺┳╸┏━╸┏━┓┏━╸╺┳┓${_bh_R}\n"
+    printf "  ${_bh_B}┣┻┓┣╸  ┃  ┃ ┣╸ ┣┳┛┃   ┃┃${_bh_R}  ${_bh_D}a better cd — zoxide-aware, auto-mkdir, with undo${_bh_R}\n"
+    printf "  ${_bh_P}┗━┛┗━╸ ╹  ╹ ┗━╸╹┗╸┗━╸╺┻┛${_bh_R}  ${_bh_D}v${BETTERCD_VERSION} · one file of shell · zero deps${_bh_R}\n"
+    printf "\n"
+    printf "  ${_bh_D}cd has two answers: it works, or it wastes your time. This removes the second one.${_bh_R}\n"
+    printf "\n  ${_bh_S}THE MOVES${_bh_R}\n"
+    printf "    ${_bh_C}%-24s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
+        "cd <missing-dir>"  "under cwd → created + entered, ✻ sparkle + press ↑ = undo-cd" \
+        "cd sr"             "typo guard: 'did you mean src/ ?' before junk is made" \
+        "cd app.py:42:7"    "pasted stack-trace paths just work (→ the file's dir)" \
+        "cd.."              "the no-space classic — cd.. cd... cd.... all real" \
+        "cd -"              "classic toggle · vanished dirs auto-followed by inode" \
+        "undo-cd"           "go back + remove exactly what was created (rmdir-only)"
+    printf "\n  ${_bh_S}THE DROPDOWN${_bh_R}  ${_bh_D}(cd -- · your places: live + zoxide + replayed history)${_bh_R}\n"
+    printf "    ${_bh_C}%-24s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
+        "↑↓ jk · wheel · hover" "move — wheel glides the list, hover grabs" \
+        "⏎ / click · 1-9 · esc" "go · pick row · leave" \
+        "p · t · v · e"         "pin (persists) · mark .project/ · table view · icons↔emoji" \
+        "r · l · / or type"     "sort · preset filter · blazing fuzzy find (then zoxide+disk)" \
+        "u · . · o · g G · ?"   "parent · full paths · reveal · top/bottom · everything"
+    printf "    ${_bh_D}glyphs: ⚑ pinned  ${_bh_R}${_bh_G}● clean${_bh_R}  ${_bh_Y}◐ modified${_bh_R}  ${_bh_O}○ untracked${_bh_R}  ${_bh_W}▪ project${_bh_R}  ${_bh_D}+ found · bold = .project${_bh_R}\n"
+    printf "\n  ${_bh_S}SELF-CARE${_bh_R}\n"
+    printf "    ${_bh_C}%-24s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
+        "autoreload"            "every cd checks freshness fork-free — edits apply themselves" \
+        "bettercd places"       "the whole pool, numbered + tagged (live/zoxide/history)" \
+        "bettercd magic ..."    "on|off|status|window <min> — auto-dropdown on double cd -" \
+        "bettercd doctor"       "zoxide / fzf / load-order checks (--fix installs)" \
+        "bettercd backup"       "snapshot your cd paradigm + RESTORE.md" \
+        "bettercd undo|status"  "revert last create · mode/pending/version"
+    printf "\n  ${_bh_S}SAFETY${_bh_R}  ${_bh_D}(the rules that make auto-create sane)${_bh_R}\n"
+    printf "    ${_bh_D}· outside your cwd: never silent — fail once, then ✻ [y/N]   · undo is rmdir-only, never rm${_bh_R}\n"
+    printf "    ${_bh_D}· scripts get zero prompts, zero magic, stock errors          · zoxide fuzzy jumps always win${_bh_R}\n"
     printf "\n  ${_bh_S}ENV${_bh_R}\n"
-    printf "    ${_bh_C}%-25s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
+    printf "    ${_bh_C}%-24s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
         "BETTERCD_AUTO_CREATE=0" "disable auto-create" \
         "BETTERCD_QUIET=1"       "suppress hints" \
-        "BETTERCD_TYPO_GUARD=0"  "disable the did-you-mean typo guard" \
         "BETTERCD_SPARKLE=0"     "disable the animated create line" \
-        "BETTERCD_HISTORY_HINT=0" "don't push undo-cd into history after a create" \
-        "BETTERCD_SPARKLE_GLYPHS" "space-separated sparkle glyph frames" \
-        "BETTERCD_SPARKLE_COLORS" "space-separated 256-color codes" \
-        "BETTERCD_MAGIC=1"        "opt-in: cd - twice also opens the dropdown" \
-        "BETTERCD_MAGIC_WINDOW=600" "seconds the dropdown stays armed (default 300)"
-    printf "\n  ${_bh_S}EXAMPLE${_bh_R}\n"
-    printf "    ${_bh_G}\$ cd projects/newapp/src${_bh_R}       ${_bh_D}# doesn't exist yet — now it does, you're in it${_bh_R}\n"
-    printf "    ${_bh_G}\$ undo-cd${_bh_R}                      ${_bh_D}# changed your mind — back + cleaned up${_bh_R}\n"
-    printf "\n  ${_bh_D}https://github.com/fire17/bettercd${_bh_R}\n\n"
+        "BETTERCD_HISTORY_HINT=0" "don't push undo-cd into history" \
+        "BETTERCD_CD_TYPOS=0"    "no cd.. aliases (set before sourcing)" \
+        "BETTERCD_MAGIC=1"       "cd - twice also opens the dropdown" \
+        "BETTERCD_AUTORELOAD=0"  "disable seamless self-updates"
+    printf "\n  ${_bh_D}receipts: full suite ×2 shells + dash/sh smokes on every push · ~25µs happy path · MIT${_bh_R}\n"
+    printf "  ${_bh_A}✻${_bh_R} ${_bh_D}https://github.com/fire17/bettercd${_bh_R}\n\n"
 }
+
 
 __bettercd_undo() {
     if [ -z "${_BETTERCD_UNDO_CREATED-}" ]; then
