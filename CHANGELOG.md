@@ -2,6 +2,15 @@
 
 ## Unreleased (v0.12.0)
 
+- SEAMLESS AUTORELOAD: every cd runs a zero-fork freshness check (builtin
+  -nt stat + builtin stamp read vs ~/.config/bettercd/.loaded); an edited
+  bettercd.sh is re-sourced automatically on your next cd — ✻ auto-updated
+  banner, no manual source ever again. BETTERCD_AUTORELOAD=0 opts out;
+  scripts never autoreload.
+- Dropdown footer: 3 lines — position+sort, a colored glyph/color legend,
+  and key tips. Header slimmed. e toggles unicode glyphs ↔ emoji. View,
+  sort, preset and icon choices PERSIST (~/.config/bettercd/prefs).
+
 - Outside-cwd flow restyled in-brand: one ✻ line (cyan path, dim prose)
   replaces the raw two-line error; styled [y/N] prompt; scripts/non-tty keep
   the exact previous plain text.

@@ -108,6 +108,54 @@ __bettercd_interactive() {
 
 __bettercd_clear_miss() { _BETTERCD_LAST_MISS=""; }
 
+# Seamless autoreload (interactive shells): remember where we were sourced
+# from and stamp the load. Every cd does a ZERO-FORK freshness check — builtin
+# `[ file -nt file ]` (one stat syscall) + a builtin read of the stamp — and
+# re-sources this file when it changed, then re-runs the cd with the new code.
+# BETTERCD_AUTORELOAD=0 disables; scripts never autoreload (deterministic).
+_BETTERCD_SRC=""
+if [ -n "${ZSH_VERSION-}" ]; then
+    eval '_BETTERCD_SRC="${${(%):-%x}:A}"' 2>/dev/null
+elif [ -n "${BASH_VERSION-}" ]; then
+    # shellcheck disable=SC3028  # guarded bash-only
+    _BETTERCD_SRC="${BASH_SOURCE[0]-}"
+    case "$_BETTERCD_SRC" in
+        ''|/*) ;;
+        *) _BETTERCD_SRC="$(cd "$(dirname "$_BETTERCD_SRC")" 2>/dev/null && pwd)/${_BETTERCD_SRC##*/}" ;;
+    esac
+fi
+_BETTERCD_STAMP="${XDG_CONFIG_HOME:-$HOME/.config}/bettercd/.loaded"
+if [ -n "$_BETTERCD_SRC" ] && [ -f "$_BETTERCD_SRC" ]; then
+    command mkdir -p "${_BETTERCD_STAMP%/*}" 2>/dev/null
+    _bcd_srcm="$(command ls -ldT "$_BETTERCD_SRC" 2>/dev/null || command ls -ld "$_BETTERCD_SRC" 2>/dev/null)"
+    _BETTERCD_LOADED="$BETTERCD_VERSION ${_bcd_srcm#* }"
+    printf '%s\n' "$_BETTERCD_LOADED" > "$_BETTERCD_STAMP.tmp" 2>/dev/null && \
+        command mv -f "$_BETTERCD_STAMP.tmp" "$_BETTERCD_STAMP" 2>/dev/null
+    unset _bcd_srcm
+fi
+
+__bettercd_reload_check() { # rc0 = reloaded (caller should re-dispatch)
+    [ "${BETTERCD_AUTORELOAD-1}" != 0 ] || return 1
+    [ -n "$_BETTERCD_SRC" ] && [ -n "${_BETTERCD_LOADED-}" ] || return 1
+    _bcd_rl=""
+    if [ "$_BETTERCD_SRC" -nt "$_BETTERCD_STAMP" ]; then
+        _bcd_rl=1                       # file edited since ANY shell loaded it
+    else
+        _bcd_rlc=""
+        IFS= read -r _bcd_rlc < "$_BETTERCD_STAMP" 2>/dev/null
+        [ -n "$_bcd_rlc" ] && [ "$_bcd_rlc" != "$_BETTERCD_LOADED" ] && _bcd_rl=1
+    fi                                   # or another shell loaded a newer one
+    [ -n "$_bcd_rl" ] || return 1
+    # shellcheck disable=SC1090
+    if . "$_BETTERCD_SRC" 2>/dev/null; then
+        if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+            printf '\033[38;5;213m✻\033[0m \033[2mbettercd auto-updated to %s\033[0m\n' "$BETTERCD_VERSION" >&2
+        fi
+        return 0
+    fi
+    return 1
+}
+
 # control chars, computed once at source time (menus build frames fork-free)
 _BETTERCD_ESC="$(printf '\033')"
 _BETTERCD_CR="$(printf '\r')"
@@ -1026,7 +1074,7 @@ __BCD_EOF__
     # filtered count — keeps the height fixed so a filter keystroke never remeasures
     [ "$_bcd_ml_vis" -le "${_bcd_ml_basen:-0}" ] || _bcd_ml_vis="${_bcd_ml_basen:-0}"
     [ "$_bcd_ml_vis" -ge 1 ] || _bcd_ml_vis=1
-    _bcd_ml_lines=$(( _bcd_ml_vis + 2 ))
+    _bcd_ml_lines=$(( _bcd_ml_vis + 4 ))   # header+rows+position+legend+keys
     [ "$_bcd_ml_off" -gt $(( _bcd_ml_n - _bcd_ml_vis )) ] && _bcd_ml_off=$(( _bcd_ml_n - _bcd_ml_vis ))
     [ "$_bcd_ml_off" -lt 0 ] && _bcd_ml_off=0
     [ "$_bcd_ml_sel" -lt "$_bcd_ml_off" ] && _bcd_ml_off="$_bcd_ml_sel"
@@ -1089,7 +1137,7 @@ __bettercd_menu_draw() {
     elif [ -n "$_bcd_ml_query" ]; then
         _bcd_df="${_bcd_dE}[38;5;213m⌕${_bcd_dE}[0m ${_bcd_dE}[1;36m$_bcd_ml_query${_bcd_dE}[0m ${_bcd_dE}[2m· type to filter · esc clears${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     else
-        _bcd_df="${_bcd_dE}[38;5;213m✻${_bcd_dE}[0m ${_bcd_dE}[2mrecent  ↑↓ move · ⏎ cd · p pin · t mark · v table · r sort · l preset · / find · ? help${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+        _bcd_df="${_bcd_dE}[38;5;213m✻${_bcd_dE}[0m ${_bcd_dE}[2mrecent places${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     fi
     _bcd_di=0; _bcd_dend=$(( _bcd_ml_off + _bcd_ml_vis )); _bcd_demit=0
     while IFS= read -r _bcd_drow; do
@@ -1106,13 +1154,13 @@ __bettercd_menu_draw() {
                 untr)  _bcd_dcol=208 ;;
                 *)     _bcd_dcol="" ;;
             esac
-            if __bettercd_is_pinned "$_bcd_drp"; then _bcd_dgut="⚑"
-            elif [ "$_bcd_dext" = 1 ]; then _bcd_dgut="+"
-            elif [ "$_bcd_c_git" = clean ]; then _bcd_dgut="●"
-            elif [ "$_bcd_c_git" = mod ]; then _bcd_dgut="◐"
-            elif [ "$_bcd_c_git" = untr ]; then _bcd_dgut="○"
-            elif [ "$_bcd_c_proj" = 1 ]; then _bcd_dgut="▪"
-            else _bcd_dgut="·"; fi
+            if __bettercd_is_pinned "$_bcd_drp"; then _bcd_dgut="$_bcd_g_pin"
+            elif [ "$_bcd_dext" = 1 ]; then _bcd_dgut="$_bcd_g_found"
+            elif [ "$_bcd_c_git" = clean ]; then _bcd_dgut="$_bcd_g_clean"
+            elif [ "$_bcd_c_git" = mod ]; then _bcd_dgut="$_bcd_g_mod"
+            elif [ "$_bcd_c_git" = untr ]; then _bcd_dgut="$_bcd_g_untr"
+            elif [ "$_bcd_c_proj" = 1 ]; then _bcd_dgut="$_bcd_g_proj"
+            else _bcd_dgut="$_bcd_g_plain"; fi
             _bcd_dbold=""; [ "$_bcd_c_proj" = 1 ] && _bcd_dbold="1;"
             if [ "$_bcd_ml_table" = 1 ]; then
                 __bettercd_meta_d "$_bcd_drp"
@@ -1161,6 +1209,8 @@ __BCD_EOF__
     [ "$_bcd_ml_preset" != all ] && _bcd_dfoot="$_bcd_dfoot  ▸$_bcd_ml_preset"
     [ "$_bcd_ml_table" = 1 ] && _bcd_dfoot="$_bcd_dfoot  detail"
     _bcd_df="$_bcd_df  ${_bcd_dE}[2m$_bcd_dfoot${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+    _bcd_df="$_bcd_df  ${_bcd_dE}[2m$_bcd_g_pin pinned${_bcd_dE}[0m ${_bcd_dE}[38;5;40m$_bcd_g_clean clean${_bcd_dE}[0m ${_bcd_dE}[38;5;178m$_bcd_g_mod modified${_bcd_dE}[0m ${_bcd_dE}[38;5;208m$_bcd_g_untr untracked${_bcd_dE}[0m ${_bcd_dE}[1m$_bcd_g_proj project${_bcd_dE}[0m ${_bcd_dE}[2m$_bcd_g_found found · bold = .project${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+    _bcd_df="$_bcd_df  ${_bcd_dE}[2mp pin · t mark · v table · r sort · l preset · / find · e icons · ? help · esc${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     printf '%s' "$_bcd_df" >/dev/tty
 }
 
@@ -1223,12 +1273,57 @@ __bettercd_menu_rebuild() { # $1 = A|B
 # The interactive loop: raw single-byte input, a row model that pins / filters /
 # sorts / marks / colors, redraw in place, clean erase. stty is restored before
 # EVERY return path (trap-free by design).
+# Sticky prefs (view/sort/preset/icons) — ~/.config/bettercd/prefs, flat
+# key=value lines, loaded at menu open, saved atomically on change.
+__bettercd_prefs_file() { printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/bettercd/prefs"; }
+__bettercd_prefs_load() {
+    _bcd_pf="$(__bettercd_prefs_file)"
+    [ -f "$_bcd_pf" ] || return 0
+    while IFS= read -r _bcd_pl; do
+        case "$_bcd_pl" in
+            table=1) _bcd_ml_table=1 ;;
+            sort=name) _bcd_ml_sort=name ;;
+            sort=modified) _bcd_ml_sort=modified ;;
+            preset=proj) _bcd_ml_preset=proj ;;
+            preset=git) _bcd_ml_preset=git ;;
+            preset=pinned) _bcd_ml_preset=pinned ;;
+            emoji=1) _BETTERCD_EMOJI=1 ;;
+        esac
+    done < "$_bcd_pf"
+    return 0
+}
+__bettercd_prefs_save() {
+    _bcd_pf="$(__bettercd_prefs_file)"
+    command mkdir -p "${_bcd_pf%/*}" 2>/dev/null || return 0
+    {
+        printf 'table=%s\n' "${_bcd_ml_table:-0}"
+        printf 'sort=%s\n' "${_bcd_ml_sort:-recent}"
+        printf 'preset=%s\n' "${_bcd_ml_preset:-all}"
+        printf 'emoji=%s\n' "${_BETTERCD_EMOJI:-0}"
+    } > "$_bcd_pf.tmp" 2>/dev/null && command mv -f "$_bcd_pf.tmp" "$_bcd_pf" 2>/dev/null
+    return 0
+}
+
+# Icon set — `e` toggles unicode glyphs ↔ emoji (persisted). Emoji are
+# double-width, so EVERY gutter in emoji mode is an emoji (uniform columns).
+__bettercd_glyphs() {
+    if [ "${_BETTERCD_EMOJI-0}" = 1 ]; then
+        _bcd_g_pin="📌"; _bcd_g_clean="🟢"; _bcd_g_mod="🟡"; _bcd_g_untr="🟠"
+        _bcd_g_proj="📦"; _bcd_g_found="🔍"; _bcd_g_plain="▫️"
+    else
+        _bcd_g_pin="⚑"; _bcd_g_clean="●"; _bcd_g_mod="◐"; _bcd_g_untr="○"
+        _bcd_g_proj="▪"; _bcd_g_found="+"; _bcd_g_plain="·"
+    fi
+}
+
 __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (unused)
     _bcd_ml_pool="$1"
     _bcd_ml_sel=0; _bcd_ml_frame=0; _bcd_ml_off=0
     _bcd_ml_psel=-1; _bcd_ml_poff=-1; _bcd_ml_plines=0
     _bcd_ml_sort=recent; _bcd_ml_preset=all; _bcd_ml_query=""
     _bcd_ml_table=0; _bcd_ml_full=0; _bcd_ml_fmode=0; _bcd_ml_flashrow=-1
+    __bettercd_prefs_load
+    __bettercd_glyphs
     _bcd_ml_ext=""; _bcd_ml_extq=""; _bcd_ml_act=""; _bcd_ml_pick_override=""
     _bcd_ml_darwin=0; [ "$(command uname 2>/dev/null)" = Darwin ] && _bcd_ml_darwin=1
     __bettercd_pins_load
@@ -1358,13 +1453,19 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
                                     _bcd_ml_flashrow=-1; _bcd_ml_psel=-1
                                 fi
                             fi ;;
-                        v) _bcd_ml_table=$(( 1 - _bcd_ml_table )); _bcd_ml_rebuild=1 ;;
+                        v) _bcd_ml_table=$(( 1 - _bcd_ml_table )); _bcd_ml_rebuild=1
+                           __bettercd_prefs_save ;;
+                        e) # toggle unicode glyphs vs emoji (persisted)
+                           if [ "${_BETTERCD_EMOJI-0}" = 1 ]; then _BETTERCD_EMOJI=0; else _BETTERCD_EMOJI=1; fi
+                           __bettercd_glyphs; __bettercd_prefs_save
+                           _bcd_ml_psel=-2 ;;
                         r)  # F6 cycle sort: recent → name → modified
                             case "$_bcd_ml_sort" in
                                 recent) _bcd_ml_sort=name ;;
                                 name)   _bcd_ml_sort=modified ;;
                                 *)      _bcd_ml_sort=recent ;;
                             esac
+                            __bettercd_prefs_save
                             __bettercd_menu_rebuild A ;;
                         l)  # F7 cycle preset: all → projects → git → pinned
                             case "$_bcd_ml_preset" in
@@ -1373,6 +1474,7 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
                                 git)  _bcd_ml_preset=pinned ;;
                                 *)    _bcd_ml_preset=all ;;
                             esac
+                            __bettercd_prefs_save
                             __bettercd_menu_rebuild B ;;
                         u)  # F8 cd to the PARENT of the selection
                             _bcd_ml_curp="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"
@@ -1745,6 +1847,11 @@ __BCD_EOF__
 
 # --- the cd wrapper ----------------------------------------------------------
 cd() {
+    # zero-fork freshness check; on reload, re-dispatch into the NEW cd
+    if __bettercd_interactive && __bettercd_reload_check; then
+        cd "$@"
+        return $?
+    fi
     # fast passthroughs: no args, multiple args, flags, "-", dir-stack refs
     if [ "$#" -ne 1 ]; then
         __bettercd_delegate "$@" && __bettercd_clear_miss

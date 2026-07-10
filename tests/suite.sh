@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC2181,SC2217,SC2034,SC3044,SC2154,SC2088
+# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC1091,SC2181,SC2217,SC2034,SC3044,SC2154,SC2088
 #   cd failing, inspecting $? after it, and feeding its [y/N] prompt via stdin
 #   are exactly what this suite tests. SC2154: _bcd_dash_mode is set by the
 #   sourced bettercd.sh. SC2088: the ~ in a home-rel expectation is a literal
@@ -598,6 +598,34 @@ $TMP/mid" | __bettercd_sort_name)"
 cnt="$(printf '%s\n' "$sorted" | grep -c .)"
 [ "$cnt" -eq 3 ]; check "sort-name: keeps all entries (no last-line drop)" $?
 case "$sorted" in "$TMP/alp"*) ok ;; *) bad "sort-name: alphabetical order" ;; esac
+
+# 28. autoreload: cd notices a newer source file and re-sources it (zero-fork check)
+if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
+    _BETTERCD_FORCE_INTERACTIVE=1
+    ARL="$TMP/arl"; mkdir -p "$ARL"
+    cp "$BETTERCD_SH" "$ARL/bcd.sh"
+    XDG_CONFIG_HOME="$ARL/cfg"
+    . "$ARL/bcd.sh"
+    v0="$BETTERCD_VERSION"
+    sleep 1   # mtime resolution
+    sed 's/^BETTERCD_VERSION=.*/BETTERCD_VERSION="99.99.99-test"/' "$ARL/bcd.sh" > "$ARL/bcd.sh.new" \
+        && mv "$ARL/bcd.sh.new" "$ARL/bcd.sh"
+    cd "$TMP" >/dev/null 2>&1
+    [ "$BETTERCD_VERSION" = "99.99.99-test" ] && [ "$v0" != "99.99.99-test" ]
+    check "autoreload: cd picked up the edited source" $?
+    # opt-out respected
+    sleep 1
+    sed 's/^BETTERCD_VERSION=.*/BETTERCD_VERSION="88.88.88-test"/' "$ARL/bcd.sh" > "$ARL/bcd.sh.new" \
+        && mv "$ARL/bcd.sh.new" "$ARL/bcd.sh"
+    BETTERCD_AUTORELOAD=0
+    cd "$TMP" >/dev/null 2>&1
+    [ "$BETTERCD_VERSION" = "99.99.99-test" ]
+    check "autoreload: BETTERCD_AUTORELOAD=0 stays put" $?
+    unset BETTERCD_AUTORELOAD
+    XDG_CONFIG_HOME="$HOME/.config"
+    . "$BETTERCD_SH"   # restore the real one for any later tests
+    unset _BETTERCD_FORCE_INTERACTIVE
+fi
 
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
