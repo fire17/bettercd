@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.2.2"
+BETTERCD_VERSION="0.3.0"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -108,6 +108,132 @@ __bettercd_interactive() {
 
 __bettercd_clear_miss() { _BETTERCD_LAST_MISS=""; }
 
+# nth wrapping token of a space-separated list (0-based index). Tokenizes by
+# hand rather than via `for x in $list` — zsh does not word-split unquoted
+# expansions, so that idiom would see the whole list as a single token.
+__bettercd_nth() { # $1 list, $2 index → prints list[index % count]
+    _bcd_nc=0; _bcd_nrest="$1"
+    while _bcd_nrest="${_bcd_nrest# }"; [ -n "$_bcd_nrest" ]; do
+        _bcd_ntok="${_bcd_nrest%% *}"
+        _bcd_nrest="${_bcd_nrest#"$_bcd_ntok"}"
+        _bcd_nc=$((_bcd_nc + 1))
+    done
+    [ "$_bcd_nc" -gt 0 ] || return 0
+    _bcd_nwant=$(( $2 % _bcd_nc )); _bcd_nj=0; _bcd_nrest="$1"
+    while _bcd_nrest="${_bcd_nrest# }"; [ -n "$_bcd_nrest" ]; do
+        _bcd_ntok="${_bcd_nrest%% *}"
+        _bcd_nrest="${_bcd_nrest#"$_bcd_ntok"}"
+        [ "$_bcd_nj" = "$_bcd_nwant" ] && { printf '%s' "$_bcd_ntok"; return 0; }
+        _bcd_nj=$((_bcd_nj + 1))
+    done
+}
+
+# Damerau distance == 1 test (one add / remove / substitute / transpose).
+# Strips the common prefix and suffix, then classifies the tiny remainder —
+# cheap and pure-shell (dir names are short; this is never a hot path).
+__bettercd_dist1() { # $1 typed, $2 candidate → 0 if exactly one edit apart
+    _bcd_da="$1"; _bcd_db="$2"
+    while [ -n "$_bcd_da" ] && [ -n "$_bcd_db" ]; do   # drop common prefix
+        _bcd_fa=${_bcd_da#?}; _bcd_fa=${_bcd_da%"$_bcd_fa"}
+        _bcd_fb=${_bcd_db#?}; _bcd_fb=${_bcd_db%"$_bcd_fb"}
+        [ "$_bcd_fa" = "$_bcd_fb" ] || break
+        _bcd_da=${_bcd_da#?}; _bcd_db=${_bcd_db#?}
+    done
+    while [ -n "$_bcd_da" ] && [ -n "$_bcd_db" ]; do   # drop common suffix
+        _bcd_la=${_bcd_da%?}; _bcd_la=${_bcd_da#"$_bcd_la"}
+        _bcd_lb=${_bcd_db%?}; _bcd_lb=${_bcd_db#"$_bcd_lb"}
+        [ "$_bcd_la" = "$_bcd_lb" ] || break
+        _bcd_da=${_bcd_da%?}; _bcd_db=${_bcd_db%?}
+    done
+    _bcd_na=${#_bcd_da}; _bcd_nb=${#_bcd_db}
+    [ "$_bcd_na" = 1 ] && [ "$_bcd_nb" = 1 ] && return 0   # substitution
+    [ "$_bcd_na" = 0 ] && [ "$_bcd_nb" = 1 ] && return 0   # insertion
+    [ "$_bcd_na" = 1 ] && [ "$_bcd_nb" = 0 ] && return 0   # deletion
+    if [ "$_bcd_na" = 2 ] && [ "$_bcd_nb" = 2 ]; then       # transposition
+        _bcd_a1=${_bcd_da#?}; _bcd_a1=${_bcd_da%"$_bcd_a1"}
+        _bcd_a2=${_bcd_da%?}; _bcd_a2=${_bcd_da#"$_bcd_a2"}
+        _bcd_b1=${_bcd_db#?}; _bcd_b1=${_bcd_db%"$_bcd_b1"}
+        _bcd_b2=${_bcd_db%?}; _bcd_b2=${_bcd_db#"$_bcd_b2"}
+        [ "$_bcd_a1" = "$_bcd_b2" ] && [ "$_bcd_a2" = "$_bcd_b1" ] && return 0
+    fi
+    return 1
+}
+
+# Typo guard (F1). Runs only in the interactive, under-cwd, auto-create path,
+# just before mkdir — offers a close-match sibling instead of a junk dir.
+# Returns 0 → caller should create the target as usual (no match, or user
+# chose "create"); 1 → caller returns $_bcd_guard_rc (we jumped or aborted).
+__bettercd_typo_guard() { # $1 = normalized (absolute) target
+    _bcd_guard_rc=1
+    _bcd_gparent="${1%/*}"; [ -n "$_bcd_gparent" ] || _bcd_gparent="/"
+    _bcd_gbase="${1##*/}"
+    [ -n "$_bcd_gbase" ] || return 0
+    _bcd_glow="$(printf '%s' "$_bcd_gbase" | tr '[:upper:]' '[:lower:]')"
+    _bcd_matches=""; _bcd_mcount=0; _bcd_pfx=""; _bcd_pfxn=0
+    # list sibling dirs via find, not a `*/` glob: an empty parent makes zsh
+    # (nomatch on by default) ERROR on the glob instead of expanding to
+    # nothing, which would abort the guard and block the create.
+    _bcd_gents="$(find "$_bcd_gparent" -mindepth 1 -maxdepth 1 2>/dev/null)"
+    while IFS= read -r _bcd_ge; do
+        [ -n "$_bcd_ge" ] && [ -d "$_bcd_ge" ] || continue
+        _bcd_gn="${_bcd_ge##*/}"
+        [ "$_bcd_gn" = "$_bcd_gbase" ] && continue
+        _bcd_gnl="$(printf '%s' "$_bcd_gn" | tr '[:upper:]' '[:lower:]')"
+        if [ "$_bcd_gnl" = "$_bcd_glow" ] || __bettercd_dist1 "$_bcd_gbase" "$_bcd_gn"; then
+            _bcd_matches="$_bcd_matches$_bcd_gn
+"
+            _bcd_mcount=$((_bcd_mcount + 1))
+        fi
+        case "$_bcd_gn" in
+            "$_bcd_gbase"?*) _bcd_pfx="$_bcd_gn"; _bcd_pfxn=$((_bcd_pfxn + 1)) ;;
+        esac
+    done <<__BCD_EOF__
+$_bcd_gents
+__BCD_EOF__
+    if [ "$_bcd_pfxn" = 1 ]; then           # add a UNIQUE prefix match, if new
+        case "
+$_bcd_matches" in
+            *"
+$_bcd_pfx
+"*) ;;
+            *) _bcd_matches="$_bcd_matches$_bcd_pfx
+"; _bcd_mcount=$((_bcd_mcount + 1)) ;;
+        esac
+    fi
+    [ "$_bcd_mcount" -gt 0 ] || return 0     # no close match → create as usual
+
+    _bcd_first=""; _bcd_list=""; _bcd_shown=0
+    while IFS= read -r _bcd_m; do
+        [ -n "$_bcd_m" ] || continue
+        [ -n "$_bcd_first" ] || _bcd_first="$_bcd_m"
+        if [ "$_bcd_shown" -lt 4 ]; then
+            _bcd_list="$_bcd_list $_bcd_m/"
+            _bcd_shown=$((_bcd_shown + 1))
+        fi
+    done <<__BCD_EOF__
+$_bcd_matches
+__BCD_EOF__
+    [ "$_bcd_mcount" -gt 1 ] && printf 'bettercd: did you mean one of:%s\n' "$_bcd_list" >&2
+    printf 'bettercd: did you mean %s/ ? [Y=jump / c=create %s / n=abort] ' \
+        "$_bcd_first" "$_bcd_gbase" >&2
+    read -r _bcd_gans
+    case "$_bcd_gans" in
+        ''|y|Y|yes|YES)
+            if [ "$_bcd_gparent" = "/" ]; then _bcd_jump="/$_bcd_first"
+            else _bcd_jump="$_bcd_gparent/$_bcd_first"; fi
+            __bettercd_delegate "$_bcd_jump" && __bettercd_clear_miss
+            _bcd_guard_rc=$?
+            return 1 ;;
+        c|C)
+            return 0 ;;
+        *)
+            __bettercd_clear_miss
+            printf 'bettercd: aborted.\n' >&2
+            _bcd_guard_rc=1
+            return 1 ;;
+    esac
+}
+
 # --- sparkle: animated inline "+" on the create-info line ---------------------
 # Interactive terminals get a one-line announcement whose leading "+" keeps
 # sparkling for ~2s AFTER the prompt is back (Claude-Code-style churn glyphs).
@@ -155,19 +281,27 @@ __bettercd_cursor_pos() {
 }
 
 __bettercd_anim() { # $1 = absolute row of the glyph cell; writes to /dev/tty
+    # Themeable frames (F3): BETTERCD_SPARKLE_GLYPHS / _COLORS override the
+    # defaults; invalid or empty values fall back safely.
+    _bcd_glyphs="${BETTERCD_SPARKLE_GLYPHS-✢ ✳ ✶ ✻ ✽ ✻ ✶ ✳}"
+    [ -n "$_bcd_glyphs" ] || _bcd_glyphs='✢ ✳ ✶ ✻ ✽ ✻ ✶ ✳'
+    _bcd_colors="${BETTERCD_SPARKLE_COLORS-213 219 177 225}"
+    # valid = only digits and spaces, with at least one digit (glob-class test,
+    # so it needs no word splitting — zsh-safe); anything else → fall back
+    case "$_bcd_colors" in
+        *[![:digit:][:space:]]*) _bcd_colors='213 219 177 225' ;;
+        *[[:digit:]]*) ;;
+        *) _bcd_colors='213 219 177 225' ;;
+    esac
     _bcd_i=0
     while [ "$_bcd_i" -lt 16 ]; do   # 16 frames x 0.12s ≈ 2s
-        for _bcd_g in '✢' '✳' '✶' '✻' '✽' '✻' '✶' '✳'; do
-            case $((_bcd_i % 4)) in
-                0) _bcd_c='38;5;213' ;; 1) _bcd_c='38;5;219' ;;
-                2) _bcd_c='38;5;177' ;; 3) _bcd_c='38;5;225' ;;
-            esac
-            # sleep first: the anchor pre-compensates the prompt's scroll,
-            # so give the prompt one frame to actually draw
-            command sleep 0.12
-            printf '\0337\033[%s;1H\033[%sm%s\033[0m\0338' "$1" "$_bcd_c" "$_bcd_g"
-            _bcd_i=$((_bcd_i + 1))
-        done
+        _bcd_g="$(__bettercd_nth "$_bcd_glyphs" "$_bcd_i")"
+        _bcd_c="$(__bettercd_nth "$_bcd_colors" "$_bcd_i")"
+        # sleep first: the anchor pre-compensates the prompt's scroll,
+        # so give the prompt one frame to actually draw
+        command sleep 0.12
+        printf '\0337\033[%s;1H\033[38;5;%sm%s\033[0m\0338' "$1" "$_bcd_c" "$_bcd_g"
+        _bcd_i=$((_bcd_i + 1))
     done
     printf '\0337\033[%s;1H\033[1;32m+\033[0m\0338' "$1"
 }
@@ -313,6 +447,33 @@ cd() {
         return $?
     fi
 
+    # editor / stack-trace paste (F2): foo.py:42 or foo.py:42:7 — the raw
+    # target is missing; strip one or two trailing :<digits> groups and, if
+    # what's left EXISTS, go there (dir → enter it, file → its parent). A dir
+    # literally named foo:42 is unaffected: we only act when the stripped
+    # path exists, else we fall through untouched with the original arg.
+    case "$1" in
+        *:[0-9]*)
+            _bcd_ep="$1"; _bcd_epn=0
+            while [ "$_bcd_epn" -lt 2 ]; do
+                _bcd_tail="${_bcd_ep##*:}"
+                case "$_bcd_ep" in *:*) ;; *) break ;; esac
+                case "$_bcd_tail" in ''|*[!0-9]*) break ;; esac
+                _bcd_ep="${_bcd_ep%:*}"
+                _bcd_epn=$((_bcd_epn + 1))
+            done
+            if [ "$_bcd_epn" -gt 0 ] && [ -e "$_bcd_ep" ]; then
+                if [ -d "$_bcd_ep" ]; then
+                    _bcd_eres="$_bcd_ep"
+                else
+                    _bcd_eres="$(dirname -- "$_bcd_ep")"
+                fi
+                printf 'bettercd: %s → cd %s\n' "$1" "$_bcd_eres" >&2
+                __bettercd_delegate "$_bcd_eres" && __bettercd_clear_miss
+                return $?
+            fi ;;
+    esac
+
     # target doesn't exist ------------------------------------------------
     _bcd_force_create=""
     case "$1" in
@@ -339,6 +500,15 @@ cd() {
     [ "$_bcd_base" = "/" ] && _bcd_base=""
     case "$_bcd_norm" in
         "$_bcd_base"/*)
+            # typo guard (F1): interactive only, never for trailing-slash
+            # (explicit create intent), disablable via BETTERCD_TYPO_GUARD=0.
+            # Non-interactive shells keep today's behavior exactly (CI safety).
+            if [ -z "$_bcd_force_create" ] && [ "${BETTERCD_TYPO_GUARD-1}" != 0 ] \
+               && __bettercd_interactive; then
+                if ! __bettercd_typo_guard "$_bcd_norm"; then
+                    return "$_bcd_guard_rc"
+                fi
+            fi
             __bettercd_create_and_cd "$_bcd_norm"
             return $? ;;
     esac
@@ -425,6 +595,8 @@ __bettercd_help() {
         "cd <missing>"   "under cwd → mkdir -p + cd, ✻ sparkle + undo hint" \
         ""               "elsewhere → fails once; repeat → [y/N] create" \
         "cd <missing>/"  "trailing slash: always create (skips fuzzy jump)" \
+        "cd <typo>"      "close-match sibling? → did-you-mean before mkdir" \
+        "cd <file>:42:7" "editor/stack-trace paste → cd to the file's dir" \
         "cd <file>"      "jump to the file's parent directory"
     printf "\n  ${_bh_S}COMMANDS${_bh_R}\n"
     printf "    ${_bh_C}%-22s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
@@ -438,7 +610,10 @@ __bettercd_help() {
     printf "    ${_bh_C}%-25s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
         "BETTERCD_AUTO_CREATE=0" "disable auto-create" \
         "BETTERCD_QUIET=1"       "suppress hints" \
-        "BETTERCD_SPARKLE=0"     "disable the animated create line"
+        "BETTERCD_TYPO_GUARD=0"  "disable the did-you-mean typo guard" \
+        "BETTERCD_SPARKLE=0"     "disable the animated create line" \
+        "BETTERCD_SPARKLE_GLYPHS" "space-separated sparkle glyph frames" \
+        "BETTERCD_SPARKLE_COLORS" "space-separated 256-color codes"
     printf "\n  ${_bh_S}EXAMPLE${_bh_R}\n"
     printf "    ${_bh_G}\$ cd projects/newapp/src${_bh_R}       ${_bh_D}# doesn't exist yet — now it does, you're in it${_bh_R}\n"
     printf "    ${_bh_G}\$ undo-cd${_bh_R}                      ${_bh_D}# changed your mind — back + cleaned up${_bh_R}\n"

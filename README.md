@@ -63,6 +63,8 @@ flowchart LR
 
 - **`cd` into a directory that doesn't exist, under your cwd → it's created** (`mkdir -p`) and you're in it — announced by a one-liner whose leading `+` **sparkles through unicode glyphs for ~2s** (Claude-Code-style), *after* your prompt is already back. Fully non-blocking: a detached animator redraws just that one cell (cursor save/restore around an absolute-row anchor) and prompt hooks kill it the instant anything would scroll. Scripts and non-tty shells get the plain static message instead.
 - **`undo-cd`** (or `bettercd undo`) — go back where you were and remove *exactly* the directories that were created (uses `rmdir` only: anything that gained content is kept, never deleted).
+- **Typo guard before it makes junk.** `cd sr` when `src/` sits right there doesn't mkdir `sr` — it asks **`did you mean src/ ?`** first (`[Y=jump / c=create / n=abort]`). Matches are case-folds, unique prefixes, and single edits (add/drop/swap/transpose a char). Interactive only — scripts still auto-create exactly as before (CI-safe). Disable with `BETTERCD_TYPO_GUARD=0`.
+- **Editor / stack-trace paste just works.** `cd src/app.py:42` or `cd src/app.py:42:7` (the shape your traceback and `file:line:col` copies come in) strips the `:line[:col]` and drops you in the file's directory — no "no such file or directory".
 - **Outside your cwd → never silently created.** First attempt fails with a hint; an immediate identical retry asks `[y/N]`. Scripts and non-interactive shells never get prompts and never get surprise directories.
 - **Composes with [zoxide](https://github.com/ajeetdsouza/zoxide), never fights it.** If your `cd` is zoxide-powered (`zoxide init --cmd cd`), fuzzy jumps still win for bare names. A **trailing slash forces creation**: `cd newdir/` means "make it *here*", skipping the fuzzy match.
 - **`cd some/file.txt` → jumps to the file's parent directory** instead of erroring.
@@ -108,6 +110,8 @@ Auto-creating directories on `cd` is a footgun if done naively. The rules that k
 |---|---|
 | Target exists | plain `cd` (zoxide-aware), zero magic |
 | Missing, **under cwd** | create + enter + print undo one-liner |
+| Missing, **close to a sibling dir** (interactive) | `did you mean src/ ?` before mkdir — jump / create / abort |
+| Missing, ends in `:line[:col]` and the stripped path exists | editor/stack-trace paste → cd to the file's dir |
 | Missing, bare name with a zoxide match | **fuzzy jump wins** (no typo-mkdir shadowing your history) |
 | Missing, **outside cwd** | fail once with hint → identical retry prompts `[y/N]` |
 | `..` tricks (`cd a/../../etc`) | normalized *first* — a path that escapes cwd is treated as outside |
@@ -116,7 +120,7 @@ Auto-creating directories on `cd` is a footgun if done naively. The rules that k
 | Undo + zoxide | the created dir is also removed from the zoxide database |
 | Your old `cd` | detected at load (zoxide / custom function / builtin) and delegated to — never clobbered |
 
-Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_QUIET=1` (no hints), `BETTERCD_SPARKLE=0` (no animation), `builtin cd` / `command cd` (bypass entirely).
+Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_QUIET=1` (no hints), `BETTERCD_TYPO_GUARD=0` (no did-you-mean), `BETTERCD_SPARKLE=0` (no animation), `builtin cd` / `command cd` (bypass entirely).
 
 ## Performance
 
@@ -141,7 +145,10 @@ cdi <query>           interactive fuzzy cd (zoxide + fzf)
 
 BETTERCD_AUTO_CREATE=0    disable auto-create
 BETTERCD_QUIET=1          suppress hints
+BETTERCD_TYPO_GUARD=0     disable the did-you-mean typo guard
 BETTERCD_SPARKLE=0        disable the animated create line
+BETTERCD_SPARKLE_GLYPHS   space-separated glyph frames  (default: ✢ ✳ ✶ ✻ ✽ ✻ ✶ ✳)
+BETTERCD_SPARKLE_COLORS   space-separated 256-color codes (default: 213 219 177 225)
 ```
 
 ## Uninstall / restore

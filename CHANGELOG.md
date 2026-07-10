@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.3.0 — 2026-07-10
+
+- **Typo guard** — before auto-creating under cwd, an interactive `cd` checks
+  for a close-match sibling directory (same name different case, unique prefix,
+  or one edit away — add/drop/substitute/transpose) and asks
+  `did you mean src/ ? [Y=jump / c=create <target> / n=abort]` instead of
+  silently making a junk dir. Interactive only — scripts/non-tty keep today's
+  auto-create exactly (CI-safe); trailing-slash targets skip it (explicit
+  create intent); disable with `BETTERCD_TYPO_GUARD=0`.
+- **Editor / stack-trace paths** — `cd file.py:42` and `cd file.py:42:7` strip
+  the trailing `:line[:col]` and, when the stripped path exists, cd into it
+  (dir → enter, file → its parent). Only fires when the raw target is missing
+  and the stripped path exists, so a dir literally named `foo:42` is still
+  creatable. Works in all modes (zoxide / prev / builtin).
+- **Sparkle theming** — `BETTERCD_SPARKLE_GLYPHS` and `BETTERCD_SPARKLE_COLORS`
+  (space-separated glyph frames / 256-color codes) customize the create-line
+  animation; invalid or empty values fall back to the defaults safely.
+- Tests: 11 new assertions (44 total × bash + zsh) covering all three plus the
+  regressions — non-interactive auto-create, empty-parent fall-through, and
+  themed non-tty output.
+
 ## v0.2.2 — 2026-07-10
 
 - Beautiful `bettercd help`: colorized, sectioned (USAGE / COMMANDS / ENV /

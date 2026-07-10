@@ -154,6 +154,125 @@ bettercd backup >/dev/null 2>&1; check "bettercd backup runs" $?
 bdir="$(find "$HOME/.config/bettercd/backups" -name RESTORE.md 2>/dev/null | head -1)"
 [ -n "$bdir" ]; check "backup contains RESTORE.md" $?
 
+# 20. F1 typo guard ----------------------------------------------------------
+cd "$TMP"
+mkdir -p guard/src
+
+# 20g. dist1 classifier sanity (add / remove / substitute / transpose)
+__bettercd_dist1 sr src && __bettercd_dist1 teh the && ! __bettercd_dist1 abc xyz
+check "typo guard: dist1 classifier" $?
+
+# 20a. non-interactive: a typo still auto-creates (regression pin, CI safety)
+cd "$TMP/guard"
+cd sr 2>/dev/null </dev/null
+[ "$PWD" = "$TMP/guard/sr" ] && [ -d "$TMP/guard/sr" ]
+check "typo guard: non-interactive still auto-creates" $?
+rmdir "$TMP/guard/sr" 2>/dev/null
+cd "$TMP/guard"
+
+# 20b. interactive + y → jump to the close match, no junk dir created
+_BETTERCD_FORCE_INTERACTIVE=1
+cd sr 2>/dev/null <<'EOF'
+y
+EOF
+[ "$PWD" = "$TMP/guard/src" ] && [ ! -d "$TMP/guard/sr" ]
+check "typo guard: interactive y jumps to match" $?
+cd "$TMP/guard"
+
+# 20c. interactive + c → create the typo dir as asked
+cd sr 2>/dev/null <<'EOF'
+c
+EOF
+[ "$PWD" = "$TMP/guard/sr" ] && [ -d "$TMP/guard/sr" ]
+check "typo guard: interactive c creates target" $?
+rmdir "$TMP/guard/sr" 2>/dev/null
+cd "$TMP/guard"
+
+# 20d. interactive + n → abort, nothing created
+cd sr 2>/dev/null <<'EOF'
+n
+EOF
+rc=$?
+[ "$rc" -ne 0 ] && [ ! -d "$TMP/guard/sr" ] && [ "$PWD" = "$TMP/guard" ]
+check "typo guard: interactive n aborts" $?
+
+# 20e. BETTERCD_TYPO_GUARD=0 disables the guard (creates, no prompt)
+BETTERCD_TYPO_GUARD=0
+cd sr 2>/dev/null <<'EOF'
+n
+EOF
+[ "$PWD" = "$TMP/guard/sr" ] && [ -d "$TMP/guard/sr" ]
+check "typo guard: BETTERCD_TYPO_GUARD=0 skips" $?
+unset BETTERCD_TYPO_GUARD
+rmdir "$TMP/guard/sr" 2>/dev/null
+cd "$TMP/guard"
+
+# 20f. trailing slash skips the guard entirely (explicit create intent)
+cd sr/ 2>/dev/null <<'EOF'
+n
+EOF
+[ "$PWD" = "$TMP/guard/sr" ] && [ -d "$TMP/guard/sr" ]
+check "typo guard: trailing slash skips guard" $?
+unset _BETTERCD_FORCE_INTERACTIVE
+cd "$TMP"
+rm -rf "$TMP/guard"
+
+# 20h. interactive typo guard with NO sibling dirs → clean fall-through create
+#      (pins the zsh nomatch-on-empty-glob bug: guard must not block the create)
+_BETTERCD_FORCE_INTERACTIVE=1
+mkdir -p "$TMP/empty"; cd "$TMP/empty"
+cd fresh 2>/dev/null </dev/null
+[ "$PWD" = "$TMP/empty/fresh" ] && [ -d "$TMP/empty/fresh" ]
+check "typo guard: empty parent falls through to create" $?
+unset _BETTERCD_FORCE_INTERACTIVE
+cd "$TMP"; rm -rf "$TMP/empty"
+
+# 21. F2 editor-style paths ---------------------------------------------------
+cd "$TMP"
+mkdir -p eddir && touch eddir/file.py
+
+# 21a. file:line → the file's parent directory
+cd eddir/file.py:42 2>/dev/null
+[ "$PWD" = "$TMP/eddir" ]; check "editor path: file:line → file's dir" $?
+cd "$TMP"
+
+# 21b. file:line:col → the file's parent directory
+cd eddir/file.py:42:7 2>/dev/null
+[ "$PWD" = "$TMP/eddir" ]; check "editor path: file:line:col → file's dir" $?
+cd "$TMP"
+
+# 21c. dir:line → enter the directory
+cd eddir:7 2>/dev/null
+[ "$PWD" = "$TMP/eddir" ]; check "editor path: dir:line → enters dir" $?
+cd "$TMP"
+
+# 21d. missing after strip → falls through to normal create (original arg)
+cd nope.py:42 2>/dev/null
+[ "$PWD" = "$TMP/nope.py:42" ] && [ -d "$TMP/nope.py:42" ]
+check "editor path: missing-after-strip falls through to create" $?
+bettercd undo 2>/dev/null
+cd "$TMP"
+rm -rf "$TMP/eddir"
+
+# 22. F3 sparkle theming (non-tty: plain output, safe fallbacks, no crash) ----
+cd "$TMP"
+BETTERCD_SPARKLE_COLORS="1 2 3" BETTERCD_SPARKLE_GLYPHS="a b c" cd f3dir 2>"$TMP/.err"
+[ "$PWD" = "$TMP/f3dir" ] && [ -d "$TMP/f3dir" ]
+check "sparkle theming: custom env still creates (non-tty plain)" $?
+grep -q "bettercd: created" "$TMP/.err"
+check "sparkle theming: non-tty keeps plain create message" $?
+bettercd undo 2>/dev/null
+cd "$TMP"
+
+BETTERCD_SPARKLE_COLORS="not numbers" cd f3bad 2>/dev/null
+[ "$PWD" = "$TMP/f3bad" ] && [ -d "$TMP/f3bad" ]
+check "sparkle theming: invalid colors safe" $?
+bettercd undo 2>/dev/null
+cd "$TMP"
+
+[ "$(__bettercd_nth 'a b c' 0)" = a ] && [ "$(__bettercd_nth 'a b c' 4)" = b ]
+check "sparkle theming: nth wraps frames" $?
+
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
 rm -rf "$TMP"
