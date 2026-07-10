@@ -1,7 +1,9 @@
 #!/bin/sh
-# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC2181,SC2217,SC2034,SC3044
+# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC2181,SC2217,SC2034,SC3044,SC2154,SC2088
 #   cd failing, inspecting $? after it, and feeding its [y/N] prompt via stdin
-#   are exactly what this suite tests.
+#   are exactly what this suite tests. SC2154: _bcd_dash_mode is set by the
+#   sourced bettercd.sh. SC2088: the ~ in a home-rel expectation is a literal
+#   string to compare against, not a path meant to expand.
 # bettercd test suite — pure POSIX sh, runs under bash and zsh.
 # Usage: BETTERCD_SH=/path/to/bettercd.sh <shell> tests/suite.sh
 
@@ -289,6 +291,74 @@ if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
     [ "$PWD" = "$TMP" ]; check "cd.... goes up three" $?
     cd "$TMP"
 fi
+
+# 24. magic cd - state machine + CLI (non-tty: helper is pure, cd -/-- gated) -
+cd "$TMP"
+unset BETTERCD_MAGIC BETTERCD_MAGIC_WINDOW _BETTERCD_FORCE_INTERACTIVE
+
+# NB: __bettercd_dash_mode sets $_bcd_dash_mode and mutates state IN THE CURRENT
+# shell — call it directly, never via $(...) (a subshell would drop the state).
+
+# 24a. fresh state → first dash is classic
+_BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
+__bettercd_dash_mode 1000; [ "$_bcd_dash_mode" = classic ]; check "magic: first dash is classic" $?
+
+# 24b. a second dash within 60s activates magic
+__bettercd_dash_mode 1030; [ "$_bcd_dash_mode" = magic ]; check "magic: 2nd dash within 60s activates" $?
+
+# 24c. magic persists while now < UNTIL (default 300s window)
+__bettercd_dash_mode 1100; [ "$_bcd_dash_mode" = magic ]; check "magic: persists inside window" $?
+
+# 24d. each magic hit refreshes UNTIL to now+window
+[ "$_BETTERCD_MAGIC_UNTIL" = 1400 ]; check "magic: window refreshes on hit" $?
+
+# 24e. lone dashes far apart stay classic
+_BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
+__bettercd_dash_mode 5000; r1="$_bcd_dash_mode"
+__bettercd_dash_mode 5200; r2="$_bcd_dash_mode"
+[ "$r1" = classic ] && [ "$r2" = classic ]; check "magic: lone dashes stay classic" $?
+
+# 24f. BETTERCD_MAGIC=0 → always classic
+BETTERCD_MAGIC=0; _BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
+__bettercd_dash_mode 1000; c1="$_bcd_dash_mode"
+__bettercd_dash_mode 1010; c2="$_bcd_dash_mode"
+[ "$c1" = classic ] && [ "$c2" = classic ]; check "magic: BETTERCD_MAGIC=0 forces classic" $?
+unset BETTERCD_MAGIC
+
+# 24g. window override respected (600s)
+BETTERCD_MAGIC_WINDOW=600; _BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
+__bettercd_dash_mode 2000   # classic, arms LAST_DASH
+__bettercd_dash_mode 2030   # magic → UNTIL = 2030+600
+[ "$_BETTERCD_MAGIC_UNTIL" = 2630 ]; check "magic: window override respected" $?
+unset BETTERCD_MAGIC_WINDOW; _BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
+
+# 24h. CLI sets vars correctly + validates
+bettercd magic off >/dev/null;      [ "$BETTERCD_MAGIC" = 0 ];        check "magic cmd: off sets var" $?
+bettercd magic on  >/dev/null;      [ "$BETTERCD_MAGIC" = 1 ];        check "magic cmd: on sets var" $?
+bettercd magic window 10 >/dev/null; [ "$BETTERCD_MAGIC_WINDOW" = 600 ]; check "magic cmd: window 10 → 600s" $?
+bettercd magic status >/dev/null 2>&1;                                check "magic cmd: status runs" $?
+bettercd magic window abc >/dev/null 2>&1; [ $? -ne 0 ];              check "magic cmd: window rejects non-numeric" $?
+unset BETTERCD_MAGIC BETTERCD_MAGIC_WINDOW
+
+# 24i. non-interactive cd - still toggles (regression pin; 2 redirected → not interactive)
+_BETTERCD_LAST_DASH=""; _BETTERCD_MAGIC_UNTIL=""
+mkdir -p "$TMP/mdash"; cd "$TMP/mdash"; cd "$TMP"
+cd - >/dev/null 2>&1
+[ "$PWD" = "$TMP/mdash" ]; check "magic: non-interactive cd - still toggles" $?
+cd "$TMP"; rm -rf "$TMP/mdash"
+
+# 24j. non-interactive cd -- keeps old delegate behavior (no menu, no hang)
+cd -- >/dev/null 2>&1 </dev/null; check "magic: non-interactive cd -- delegates safely" $?
+cd "$TMP"
+
+# 24k. menu list builder helpers: home-rel display + nthline pick
+[ "$(HOME=/h __bettercd_home_rel /h/x/y)" = '~/x/y' ]; check "magic: home-rel path display" $?
+[ "$(__bettercd_home_rel /var/tmp)" = /var/tmp ];      check "magic: non-home path unchanged" $?
+list="/a
+/b
+/c"
+[ "$(__bettercd_nthline "$list" 0)" = /a ] && [ "$(__bettercd_nthline "$list" 2)" = /c ]
+check "magic: nthline picks the right row" $?
 
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"

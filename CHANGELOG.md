@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.6.0 — 2026-07-10
+
+- **Magic `cd -`** — a sparkling dropdown of recent places. Hit `cd -` a second
+  time (or ≥2× within a minute) and a `✻` menu of where you've been drops in:
+  arrows / `j` `k` / digits `1-8` to move, `⏎` to jump, `esc`/`q` to cancel.
+  Plain Enter picks `$OLDPWD`, so it stays *exactly* `cd -`. `cd --` opens it
+  directly. Recent places are tracked in the existing precmd hook (catches every
+  cwd change — our cd, pushd, autocd — zero forks on that hot path); the menu
+  dedups, drops `$PWD`, and caps at 8 lazily. Rendered raw-tty with in-place
+  redraw + clean erase (stty restored on every exit path, incl. Ctrl-C/Esc);
+  interactive-tty + UTF-8 gated, else the plain classic toggle. Non-interactive
+  shells and `BETTERCD_MAGIC=0` keep today's `cd -` behavior exactly.
+- **`bettercd magic on|off|status|window <minutes>`** — toggle the dropdown and
+  set the arm window live in the current shell. `status` shows mode, window,
+  time left on an active window, and the recent-places count. Persist with
+  `export BETTERCD_MAGIC=0` / `export BETTERCD_MAGIC_WINDOW=600` in your rc.
+- Tests: 17 new assertions (64 total × bash + zsh) — the `__bettercd_dash_mode`
+  state machine (fresh→classic, two-in-a-row→magic, window persist/refresh/
+  override, `BETTERCD_MAGIC=0`), the CLI setters/validation, and regression pins
+  that non-interactive `cd -` still toggles and `cd --` still delegates.
+
+
 ## v0.5.0 — 2026-07-10
 
 - `cd..` typo aliases: `cd..` → `cd ..`, `cd...` → `cd ../..`, up to `cd.....`

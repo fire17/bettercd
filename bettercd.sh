@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.5.0"
+BETTERCD_VERSION="0.6.0"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -244,8 +244,9 @@ __BCD_EOF__
 # it the moment anything would scroll the screen.
 # Scripts / non-tty / BETTERCD_SPARKLE=0 keep the plain static messages.
 
-__bettercd_fancy() {
-    [ "${BETTERCD_SPARKLE-1}" != 0 ] || return 1
+# tty capable of the fancy stuff: real /dev/tty, non-dumb TERM, bash/zsh, UTF-8.
+# Shared by the sparkle line and the magic cd - menu (which has its own toggle).
+__bettercd_tty_ok() {
     [ -t 2 ] || return 1
     [ "${TERM-}" != dumb ] || return 1
     [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ] || return 1
@@ -254,6 +255,11 @@ __bettercd_fancy() {
         *) return 1 ;;
     esac
     ( : </dev/tty ) 2>/dev/null
+}
+
+__bettercd_fancy() {
+    [ "${BETTERCD_SPARKLE-1}" != 0 ] || return 1
+    __bettercd_tty_ok
 }
 
 # Ask the terminal where the cursor is; sets _bcd_crow/_bcd_ccol. Any typed-
@@ -336,6 +342,14 @@ __bettercd_history_hint() {
 # after all command output, so the glyph row can be computed exactly, even
 # at the bottom of the screen. Any prompt after that means a scroll: kill.
 __bettercd_anim_precmd() {
+    # recent-places tracking (magic cd -): catches EVERY cwd change — our cd,
+    # pushd, autocd. Hot path, so pure string ops, zero forks, no dedup/cap
+    # here; the menu dedups + drops $PWD + caps at 8 lazily when it opens.
+    if [ "$PWD" != "${_BETTERCD_LASTPWD-}" ]; then
+        [ -n "${_BETTERCD_LASTPWD-}" ] && _BETTERCD_RECENT="$_BETTERCD_LASTPWD
+${_BETTERCD_RECENT-}"
+        _BETTERCD_LASTPWD="$PWD"
+    fi
     __bettercd_anim_kill
     [ -n "${_BETTERCD_ANIM_PENDING-}" ] || return 0
     _bcd_t="$_BETTERCD_ANIM_PENDING"
@@ -432,6 +446,179 @@ __BCD_EOF__
     return 0
 }
 
+# --- magic cd - : a sparkling dropdown of recent places ----------------------
+# `cd -` twice (or ≥2 within a minute) opens a menu of where you've been; plain
+# Enter picks $OLDPWD, so it stays === classic `cd -`. `cd --` opens it directly.
+# Non-interactive shells and BETTERCD_MAGIC=0 keep the exact classic toggle.
+
+# Validated magic window in seconds (default 300). One source of truth.
+__bettercd_magic_window() {
+    _bcd_mw="${BETTERCD_MAGIC_WINDOW:-300}"
+    case "$_bcd_mw" in ''|*[!0-9]*) _bcd_mw=300 ;; esac
+    printf '%s' "$_bcd_mw"
+}
+
+# Arm the magic window: remember this dash and stay magic until now+WINDOW.
+__bettercd_dash_arm() { # $1 = now (epoch secs)
+    case "${1-}" in ''|*[!0-9]*) return 0 ;; esac
+    _BETTERCD_LAST_DASH="$1"
+    _BETTERCD_MAGIC_UNTIL=$(( $1 + $(__bettercd_magic_window) ))
+}
+
+# Decision helper (now as $1 so the suite can test it without a clock or a
+# tty). Sets _bcd_dash_mode to classic|magic and updates _BETTERCD_LAST_DASH /
+# _BETTERCD_MAGIC_UNTIL. Must run in the CURRENT shell (never via $(...)): the
+# state it updates has to persist across cd - invocations. BETTERCD_MAGIC=0 →
+# always classic.
+__bettercd_dash_mode() { # $1 = now → sets $_bcd_dash_mode
+    if [ "${BETTERCD_MAGIC-1}" = 0 ]; then
+        _BETTERCD_LAST_DASH="$1"; _bcd_dash_mode=classic; return 0
+    fi
+    # inside an active window → magic, and refresh the window
+    if [ -n "${_BETTERCD_MAGIC_UNTIL-}" ] && [ "$1" -lt "$_BETTERCD_MAGIC_UNTIL" ]; then
+        __bettercd_dash_arm "$1"; _bcd_dash_mode=magic; return 0
+    fi
+    # a prior dash within the last 60s → activate
+    if [ -n "${_BETTERCD_LAST_DASH-}" ] && [ $(( $1 - _BETTERCD_LAST_DASH )) -le 60 ] \
+       && [ $(( $1 - _BETTERCD_LAST_DASH )) -ge 0 ]; then
+        __bettercd_dash_arm "$1"; _bcd_dash_mode=magic; return 0
+    fi
+    _BETTERCD_LAST_DASH="$1"; _bcd_dash_mode=classic; return 0
+}
+
+# Home-relative display: ~/foo for paths under $HOME.
+__bettercd_home_rel() { # $1 path
+    case "$1" in
+        "$HOME")   printf '~' ;;
+        "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
+        *)         printf '%s' "$1" ;;
+    esac
+}
+
+# Nth (0-based) non-empty line of a newline list.
+__bettercd_nthline() { # $1 list, $2 index
+    _bcd_tl_i=0
+    while IFS= read -r _bcd_tl_l; do
+        [ -n "$_bcd_tl_l" ] || continue
+        [ "$_bcd_tl_i" = "$2" ] && { printf '%s' "$_bcd_tl_l"; return 0; }
+        _bcd_tl_i=$((_bcd_tl_i + 1))
+    done <<__BCD_EOF__
+$1
+__BCD_EOF__
+}
+
+# Draw the whole menu (header + rows) to /dev/tty. Raw mode ⇒ lines end \r\n.
+# The selected row's ✻ cycles the sparkle palette by $4 for a little delight.
+__bettercd_menu_draw() { # $1 list, $2 count, $3 selected, $4 frame
+    _bcd_dc="$(__bettercd_nth '213 219 177 225' "$4")"
+    printf '\033[38;5;213m✻\033[0m \033[2mrecent places  ↑↓ move · ⏎ cd · esc cancel\033[0m\033[K\r\n' >/dev/tty
+    _bcd_di=0
+    while IFS= read -r _bcd_dp; do
+        [ -n "$_bcd_dp" ] || continue
+        _bcd_dd="$(__bettercd_home_rel "$_bcd_dp")"
+        if [ "$_bcd_di" = "$3" ]; then
+            printf '\033[38;5;%sm✻\033[0m \033[1;36m%s\033[0m\033[K\r\n' "$_bcd_dc" "$_bcd_dd" >/dev/tty
+        else
+            printf '  \033[2m· %s\033[0m\033[K\r\n' "$_bcd_dd" >/dev/tty
+        fi
+        _bcd_di=$((_bcd_di + 1))
+    done <<__BCD_EOF__
+$1
+__BCD_EOF__
+}
+
+# The interactive loop: raw single-byte input, redraw in place, clean erase.
+# stty is restored before EVERY return path (trap-free by design).
+__bettercd_menu_loop() { # $1 list, $2 count
+    _bcd_ml_list="$1"; _bcd_ml_n="$2"; _bcd_ml_sel=0; _bcd_ml_frame=0
+    _bcd_ml_lines=$((_bcd_ml_n + 1))
+    _bcd_ml_st="$(command stty -g </dev/tty 2>/dev/null)"
+    [ -n "$_bcd_ml_st" ] || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
+    command stty raw -echo </dev/tty 2>/dev/null
+    __bettercd_menu_draw "$_bcd_ml_list" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame"
+
+    _bcd_ml_esc="$(printf '\033')"; _bcd_ml_cr="$(printf '\r')"
+    _bcd_ml_etx="$(printf '\003')"; _bcd_ml_act=""
+    while :; do
+        _bcd_ml_key="$(dd bs=1 count=1 2>/dev/null </dev/tty)"
+        _bcd_ml_move=""
+        case "$_bcd_ml_key" in
+            "$_bcd_ml_esc")
+                command stty min 0 time 2 </dev/tty 2>/dev/null
+                _bcd_ml_seq="$(dd bs=1 count=2 2>/dev/null </dev/tty)"
+                command stty raw -echo </dev/tty 2>/dev/null
+                case "$_bcd_ml_seq" in
+                    '[A'|'OA') _bcd_ml_move=up ;;
+                    '[B'|'OB') _bcd_ml_move=down ;;
+                    '')        _bcd_ml_act=cancel ;;   # bare ESC
+                    *) ;;
+                esac ;;
+            k|K) _bcd_ml_move=up ;;
+            j|J) _bcd_ml_move=down ;;
+            "$_bcd_ml_cr") _bcd_ml_act=select ;;
+            ''|q|Q|"$_bcd_ml_etx") _bcd_ml_act=cancel ;;   # EOF / q / Ctrl-C
+            [1-8])
+                if [ "$_bcd_ml_key" -le "$_bcd_ml_n" ]; then
+                    _bcd_ml_sel=$((_bcd_ml_key - 1)); _bcd_ml_act=select
+                fi ;;
+            *) ;;
+        esac
+        if [ "$_bcd_ml_move" = up ]; then
+            _bcd_ml_sel=$(( (_bcd_ml_sel - 1 + _bcd_ml_n) % _bcd_ml_n ))
+            _bcd_ml_frame=$((_bcd_ml_frame + 1))
+        elif [ "$_bcd_ml_move" = down ]; then
+            _bcd_ml_sel=$(( (_bcd_ml_sel + 1) % _bcd_ml_n ))
+            _bcd_ml_frame=$((_bcd_ml_frame + 1))
+        fi
+        [ -n "$_bcd_ml_act" ] && break
+        printf '\033[%dA' "$_bcd_ml_lines" >/dev/tty
+        __bettercd_menu_draw "$_bcd_ml_list" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame"
+    done
+
+    printf '\033[%dA\033[J' "$_bcd_ml_lines" >/dev/tty   # erase the menu
+    command stty "$_bcd_ml_st" </dev/tty 2>/dev/null      # restore BEFORE acting
+    if [ "$_bcd_ml_act" = select ]; then
+        _bcd_ml_pick="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"
+        if [ -n "$_bcd_ml_pick" ]; then
+            __bettercd_delegate "$_bcd_ml_pick" && __bettercd_clear_miss
+            _bcd_ml_rc=$?
+            printf '\033[2m✻ cd %s\033[0m\n' "$(__bettercd_home_rel "$_bcd_ml_pick")" >/dev/tty
+            return "$_bcd_ml_rc"
+        fi
+    fi
+    return 1   # cancel
+}
+
+# Entry point: build the list (OLDPWD first + deduped recent, cap 8), or fall
+# back to a silent classic toggle when there's nothing worth a menu.
+__bettercd_magic_menu() {
+    __bettercd_tty_ok || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
+    _bcd_mm_list=""; _bcd_mm_n=0
+    if [ -n "${OLDPWD-}" ] && [ -d "$OLDPWD" ]; then
+        _bcd_mm_list="$OLDPWD
+"; _bcd_mm_n=1
+    fi
+    while IFS= read -r _bcd_mm_r; do
+        [ "$_bcd_mm_n" -lt 8 ] || break
+        [ -n "$_bcd_mm_r" ] || continue
+        [ "$_bcd_mm_r" = "$PWD" ] && continue
+        [ -d "$_bcd_mm_r" ] || continue
+        case "
+$_bcd_mm_list" in *"
+$_bcd_mm_r
+"*) continue ;; esac
+        _bcd_mm_list="$_bcd_mm_list$_bcd_mm_r
+"; _bcd_mm_n=$((_bcd_mm_n + 1))
+    done <<__BCD_EOF__
+${_BETTERCD_RECENT-}
+__BCD_EOF__
+    if [ "$_bcd_mm_n" -le 1 ]; then          # just OLDPWD or empty → classic
+        __bettercd_delegate - && __bettercd_clear_miss
+        return $?
+    fi
+    __bettercd_menu_loop "$_bcd_mm_list" "$_bcd_mm_n"
+}
+
 # --- the cd wrapper ----------------------------------------------------------
 cd() {
     # fast passthroughs: no args, multiple args, flags, "-", dir-stack refs
@@ -440,7 +627,33 @@ cd() {
         return $?
     fi
     case "$1" in
-        '' | - | -- )
+        '' )
+            __bettercd_delegate "$@" && __bettercd_clear_miss
+            return $? ;;
+        - )
+            # magic cd -: two in a row (or an active window) → dropdown.
+            # Non-interactive OR BETTERCD_MAGIC=0 → exact classic toggle.
+            _bcd_now="$(date +%s 2>/dev/null)"   # external date OK: rare path
+            case "$_bcd_now" in
+                ''|*[!0-9]*) ;;                  # no clock → classic
+                *)
+                    if __bettercd_interactive; then
+                        __bettercd_dash_mode "$_bcd_now"
+                        if [ "$_bcd_dash_mode" = magic ]; then
+                            __bettercd_magic_menu
+                            return $?
+                        fi
+                    fi ;;
+            esac
+            __bettercd_delegate "$@" && __bettercd_clear_miss
+            return $? ;;
+        -- )
+            # `cd --` opens the dropdown directly (interactive, magic not off).
+            if __bettercd_interactive && [ "${BETTERCD_MAGIC-1}" != 0 ]; then
+                __bettercd_dash_arm "$(date +%s 2>/dev/null)"
+                __bettercd_magic_menu
+                return $?
+            fi
             __bettercd_delegate "$@" && __bettercd_clear_miss
             return $? ;;
         -* | +* )
@@ -603,6 +816,7 @@ bettercd() {
         undo)    __bettercd_undo ;;
         doctor)  shift; __bettercd_doctor "$@" ;;
         backup)  __bettercd_backup ;;
+        magic)   shift; __bettercd_magic_cmd "$@" ;;
         status)  __bettercd_status ;;
         version|--version|-v) printf 'bettercd %s\n' "$BETTERCD_VERSION" ;;
         help|--help|-h|'')    __bettercd_help ;;
@@ -635,6 +849,8 @@ __bettercd_help() {
         "bettercd doctor"  "check zoxide / fzf / load order (--fix installs)" \
         "bettercd backup"  "snapshot your cd paradigm + RESTORE.md" \
         "bettercd status"  "mode, pending undo, version" \
+        "bettercd magic"   "on|off|status|window <min> — the cd - dropdown" \
+        "cd - (×2)"        "sparkling dropdown of recent places (cd -- forces it)" \
         "cdi <query>"      "interactive fuzzy cd (zoxide + fzf)"
     printf "\n  ${_bh_S}ENV${_bh_R}\n"
     printf "    ${_bh_C}%-25s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
@@ -644,7 +860,9 @@ __bettercd_help() {
         "BETTERCD_SPARKLE=0"     "disable the animated create line" \
         "BETTERCD_HISTORY_HINT=0" "don't push undo-cd into history after a create" \
         "BETTERCD_SPARKLE_GLYPHS" "space-separated sparkle glyph frames" \
-        "BETTERCD_SPARKLE_COLORS" "space-separated 256-color codes"
+        "BETTERCD_SPARKLE_COLORS" "space-separated 256-color codes" \
+        "BETTERCD_MAGIC=0"        "disable the cd - recent-places dropdown" \
+        "BETTERCD_MAGIC_WINDOW=600" "seconds the dropdown stays armed (default 300)"
     printf "\n  ${_bh_S}EXAMPLE${_bh_R}\n"
     printf "    ${_bh_G}\$ cd projects/newapp/src${_bh_R}       ${_bh_D}# doesn't exist yet — now it does, you're in it${_bh_R}\n"
     printf "    ${_bh_G}\$ undo-cd${_bh_R}                      ${_bh_D}# changed your mind — back + cleaned up${_bh_R}\n"
@@ -693,6 +911,51 @@ __bettercd_status() {
         printf '  pending undo: none\n'
     fi
     printf '  auto-create:  %s\n' "$([ "${BETTERCD_AUTO_CREATE-1}" = 0 ] && echo off || echo on)"
+}
+
+# bettercd magic on|off|status|window <minutes> — bettercd is a function, so a
+# plain assignment sets the var in the CURRENT shell. Export in your rc to
+# persist:  export BETTERCD_MAGIC=0   /   export BETTERCD_MAGIC_WINDOW=600
+__bettercd_magic_cmd() {
+    case "${1-status}" in
+        on)  BETTERCD_MAGIC=1; printf 'bettercd: magic cd - is ON (auto)\n' ;;
+        off) BETTERCD_MAGIC=0; printf 'bettercd: magic cd - is OFF\n' ;;
+        window)
+            case "${2-}" in
+                ''|*[!0-9]*)
+                    printf 'bettercd: magic window needs whole minutes, e.g. bettercd magic window 10\n' >&2
+                    return 1 ;;
+                *)
+                    BETTERCD_MAGIC_WINDOW=$(( $2 * 60 ))
+                    printf 'bettercd: magic window = %s min (%ss)\n' "$2" "$BETTERCD_MAGIC_WINDOW" ;;
+            esac ;;
+        status) __bettercd_magic_status ;;
+        *) printf 'bettercd: magic {on|off|status|window <minutes>}\n' >&2; return 1 ;;
+    esac
+}
+
+__bettercd_magic_status() {
+    _bcd_gs_win="$(__bettercd_magic_window)"
+    printf 'bettercd magic cd -\n'
+    printf '  mode:          %s\n' "$([ "${BETTERCD_MAGIC-1}" = 0 ] && echo off || echo auto)"
+    printf '  window:        %ss (%s min)\n' "$_bcd_gs_win" "$(( _bcd_gs_win / 60 ))"
+    _bcd_gs_now="$(date +%s 2>/dev/null)"
+    case "$_bcd_gs_now" in
+        ''|*[!0-9]*) printf '  active:        unknown (no clock)\n' ;;
+        *)
+            if [ -n "${_BETTERCD_MAGIC_UNTIL-}" ] && [ "$_bcd_gs_now" -lt "$_BETTERCD_MAGIC_UNTIL" ]; then
+                printf '  active:        %ss left\n' "$(( _BETTERCD_MAGIC_UNTIL - _bcd_gs_now ))"
+            else
+                printf '  active:        not active\n'
+            fi ;;
+    esac
+    _bcd_gs_c=0
+    while IFS= read -r _bcd_gs_l; do
+        [ -n "$_bcd_gs_l" ] && _bcd_gs_c=$((_bcd_gs_c + 1))
+    done <<__BCD_EOF__
+${_BETTERCD_RECENT-}
+__BCD_EOF__
+    printf '  recent places: %s\n' "$_bcd_gs_c"
 }
 
 # --- doctor ------------------------------------------------------------------

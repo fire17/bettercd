@@ -4,7 +4,7 @@
 [![ci](https://github.com/fire17/bettercd/actions/workflows/ci.yml/badge.svg)](https://github.com/fire17/bettercd/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/fire17/bettercd?color=e8b84a)](https://github.com/fire17/bettercd/releases)
 [![overhead](https://img.shields.io/badge/overhead-~25µs%20per%20cd-2ea44f)](#performance)
-[![tests](https://img.shields.io/badge/tests-34×2%20%2B%20smokes%20green-2ea44f)](tests/suite.sh)
+[![tests](https://img.shields.io/badge/tests-64×2%20%2B%20smokes%20green-2ea44f)](tests/suite.sh)
 [![deps](https://img.shields.io/badge/deps-zero-9bd1f5)](#install)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![stars](https://img.shields.io/github/stars/fire17/bettercd?style=social)](https://github.com/fire17/bettercd/stargazers)
@@ -62,6 +62,7 @@ flowchart LR
 ## What it does
 
 - **`cd` into a directory that doesn't exist, under your cwd → it's created** (`mkdir -p`) and you're in it — announced by a one-liner whose leading `+` **sparkles through unicode glyphs for ~2s** (Claude-Code-style), *after* your prompt is already back. Fully non-blocking: a detached animator redraws just that one cell (cursor save/restore around an absolute-row anchor) and prompt hooks kill it the instant anything would scroll. Scripts and non-tty shells get the plain static message instead.
+- **`cd -` twice → a sparkling dropdown of recent places.** Tap `cd -` a second time (or hit it ≥2× within a minute) and a `✻` menu of where you've been drops in — arrows / `j` `k` / digits to move, `⏎` to jump, `esc` to cancel. **Plain Enter picks `$OLDPWD`, so it stays *exactly* `cd -`.** `cd --` opens it directly. Non-interactive shells and `BETTERCD_MAGIC=0` keep the plain classic toggle, untouched. Tune the arm window with `bettercd magic window <min>`.
 - **`undo-cd`** (or `bettercd undo`) — go back where you were and remove *exactly* the directories that were created (uses `rmdir` only: anything that gained content is kept, never deleted).
 - **Typo guard before it makes junk.** `cd sr` when `src/` sits right there doesn't mkdir `sr` — it asks **`did you mean src/ ?`** first (`[Y=jump / c=create / n=abort]`). Matches are case-folds, unique prefixes, and single edits (add/drop/swap/transpose a char). Interactive only — scripts still auto-create exactly as before (CI-safe). Disable with `BETTERCD_TYPO_GUARD=0`.
 - **Editor / stack-trace paste just works.** `cd src/app.py:42` or `cd src/app.py:42:7` (the shape your traceback and `file:line:col` copies come in) strips the `:line[:col]` and drops you in the file's directory — no "no such file or directory".
@@ -116,12 +117,13 @@ Auto-creating directories on `cd` is a footgun if done naively. The rules that k
 | Missing, bare name with a zoxide match | **fuzzy jump wins** (no typo-mkdir shadowing your history) |
 | Missing, **outside cwd** | fail once with hint → identical retry prompts `[y/N]` |
 | `..` tricks (`cd a/../../etc`) | normalized *first* — a path that escapes cwd is treated as outside |
-| Non-interactive shell / script | no prompts, no auto-create surprises outside cwd |
+| `cd -` twice / `cd --` (interactive) | sparkling dropdown of recent places; plain Enter === classic `cd -` |
+| Non-interactive shell / script | no prompts, no auto-create surprises outside cwd; `cd -` is the plain classic toggle |
 | Undo | `rmdir` only — never `rm`; non-empty dirs are kept and reported |
 | Undo + zoxide | the created dir is also removed from the zoxide database |
 | Your old `cd` | detected at load (zoxide / custom function / builtin) and delegated to — never clobbered |
 
-Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_QUIET=1` (no hints), `BETTERCD_TYPO_GUARD=0` (no did-you-mean), `BETTERCD_SPARKLE=0` (no animation), `builtin cd` / `command cd` (bypass entirely).
+Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_QUIET=1` (no hints), `BETTERCD_TYPO_GUARD=0` (no did-you-mean), `BETTERCD_SPARKLE=0` (no animation), `BETTERCD_MAGIC=0` (no `cd -` dropdown), `builtin cd` / `command cd` (bypass entirely).
 
 ## Performance
 
@@ -137,11 +139,13 @@ wrapper: 36.9µs per cd   builtin: 11.7µs per cd   overhead: ~25µs
 
 ```
 cd <dir>              everything above
+cd -  (twice)         sparkling dropdown of recent places (cd -- forces it)
 undo-cd               revert the last auto-create (go back + rmdir created chain)
 bettercd undo         same thing, spelled out
 bettercd doctor       health-check zoxide / fzf / load order   (--fix to install)
 bettercd backup       snapshot current cd setup + RESTORE.md
 bettercd status       mode, pending undo, version
+bettercd magic        on | off | status | window <minutes> — the cd - dropdown
 cdi <query>           interactive fuzzy cd (zoxide + fzf)
 
 BETTERCD_AUTO_CREATE=0    disable auto-create
@@ -150,6 +154,8 @@ BETTERCD_TYPO_GUARD=0     disable the did-you-mean typo guard
 BETTERCD_SPARKLE=0        disable the animated create line
 BETTERCD_HISTORY_HINT=0   don't push undo-cd into history after a create
 BETTERCD_CD_TYPOS=0       don't alias cd.. / cd... typos (set before sourcing)
+BETTERCD_MAGIC=0          disable the cd - recent-places dropdown (classic toggle)
+BETTERCD_MAGIC_WINDOW=600 seconds the dropdown stays armed after activating (default 300)
 BETTERCD_SPARKLE_GLYPHS   space-separated glyph frames  (default: ✢ ✳ ✶ ✻ ✽ ✻ ✶ ✳)
 BETTERCD_SPARKLE_COLORS   space-separated 256-color codes (default: 213 219 177 225)
 ```
@@ -174,7 +180,7 @@ Remove the `# >>> bettercd >>>` block (or the `source … bettercd.sh` line) fro
 
 ## How it's verified
 
-Every push runs 34 assertions under **bash and zsh** each, a deterministic zoxide-stub suite (6 more per shell), and smoke tests under **both dash and posix-mode sh** — on ubuntu and macos ([CI](https://github.com/fire17/bettercd/actions/workflows/ci.yml)), shellcheck-clean. Releases are gate-checked by installing from the published tap (`brew install fire17/tap/bettercd && brew test`). That gate has caught two real defects before users saw them: zoxide's doctor false-positive (fixed in v0.1.1) and a posix-mode `/bin/sh` sourcing failure (fixed in v0.2.1, same day it shipped).
+Every push runs 64 assertions under **bash and zsh** each, a deterministic zoxide-stub suite (6 more per shell), and smoke tests under **both dash and posix-mode sh** — on ubuntu and macos ([CI](https://github.com/fire17/bettercd/actions/workflows/ci.yml)), shellcheck-clean. Releases are gate-checked by installing from the published tap (`brew install fire17/tap/bettercd && brew test`). That gate has caught two real defects before users saw them: zoxide's doctor false-positive (fixed in v0.1.1) and a posix-mode `/bin/sh` sourcing failure (fixed in v0.2.1, same day it shipped).
 
 ## Siblings
 
