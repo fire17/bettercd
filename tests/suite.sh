@@ -511,6 +511,94 @@ STUB
     cd "$TMP"
 fi
 
+# 28. F1-F7 dropdown row model (pure helpers — the interactive loop is tty-only
+# and verified live; these pin the fork-free building blocks it composes) -------
+cd "$TMP"
+
+# 28a. lowercase helper (fork-free) + fuzzy subsequence matcher
+__bettercd_lc "AbC/XyZ"; [ "$_bcd_lc" = "abc/xyz" ]; check "lc: lowercases mixed case" $?
+__bettercd_fuzzy crb "$HOME/Creations/bettercd"; check "fuzzy: 'crb' subsequence matches" $?
+__bettercd_fuzzy CRB "$HOME/Creations/bettercd"; check "fuzzy: case-insensitive match" $?
+if __bettercd_fuzzy zqx "$HOME/Creations/bettercd"; then bad "fuzzy: non-subsequence excluded"; else ok; fi
+__bettercd_fuzzy "" "anything"; check "fuzzy: empty query matches all" $?
+
+# 28b. pad helper: truncates with ellipsis, pads short strings to width
+__bettercd_pad short 8; [ "$_bcd_pad_out" = "short   " ]; check "pad: pads to width" $?
+__bettercd_pad abcdefghij 5; case "$_bcd_pad_out" in abcd*) ok ;; *) bad "pad: truncates long" ;; esac
+
+# 28c. F1 pins: toggle persists to an atomically-written file; load restores order
+_BETTERCD_PINS_LOADED=""; _BETTERCD_PINS=""
+mkdir -p "$TMP/pin1" "$TMP/pin2"
+__bettercd_pin_toggle "$TMP/pin1"
+__bettercd_pin_toggle "$TMP/pin2"
+__bettercd_is_pinned "$TMP/pin1"; check "pin: toggle marks pinned" $?
+pinfile="$HOME/.config/bettercd/pins"
+[ -f "$pinfile" ]; check "pin: persists to file" $?
+case "$(cat "$pinfile")" in *"$TMP/pin1"*"$TMP/pin2"*) ok ;; *) bad "pin: file keeps pin order" ;; esac
+# atomicity: the persist path must go through a temp file + mv (grep the source)
+grep -q 'command mv -f' "$BETTERCD_SH"; check "pin: write uses temp+mv (atomic)" $?
+# reload from file restores pins
+_BETTERCD_PINS_LOADED=""; _BETTERCD_PINS=""
+__bettercd_pins_load
+__bettercd_is_pinned "$TMP/pin2"; check "pin: reload restores from file" $?
+# unpin removes it, file updates
+__bettercd_pin_toggle "$TMP/pin1"
+if __bettercd_is_pinned "$TMP/pin1"; then bad "pin: unpin removes"; else ok; fi
+case "$(cat "$pinfile")" in *pin1*) bad "pin: unpin drops from file" ;; *) ok ;; esac
+_BETTERCD_PINS_LOADED=""; _BETTERCD_PINS=""
+
+# 28d. F2 project mark: creates .project/ + empty status; second call is a no-op
+mkdir -p "$TMP/pm"
+__bettercd_project_mark "$TMP/pm"; check "project-mark: rc0 on first mark" $?
+[ -d "$TMP/pm/.project" ] && [ -f "$TMP/pm/.project/status" ]; check "project-mark: creates .project/status" $?
+__bettercd_project_mark "$TMP/pm"; [ $? -ne 0 ]; check "project-mark: rc1 when already marked" $?
+
+# 28e. F5 detail metadata: version + shipped from a .project/status fixture
+mkdir -p "$TMP/dv/.project"
+printf 'version: v1.2.3\nlast_shipped: v1.2.3\n' > "$TMP/dv/.project/status"
+[ "$(__bettercd_rowver "$TMP/dv")" = "v1.2.3" ]; check "detail: version from .project/status" $?
+[ "$(__bettercd_rowshipped "$TMP/dv")" = "y" ]; check "detail: shipped y when last_shipped==version" $?
+printf 'version: v2.0.0\nlast_shipped: v1.0.0\n' > "$TMP/dv/.project/status"
+[ "$(__bettercd_rowshipped "$TMP/dv")" = "n" ]; check "detail: shipped n when mismatch" $?
+mkdir -p "$TMP/dv2"
+[ -z "$(__bettercd_rowshipped "$TMP/dv2")" ]; check "detail: shipped blank without .project" $?
+[ "$(__bettercd_rowver "$TMP/dv2")" = "-" ]; check "detail: version - for plain dir" $?
+case "$(__bettercd_rowmtime "$TMP/dv2")" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ok ;; *) bad "detail: mtime is YYYY-MM-DD" ;; esac
+
+# 28f. F4 git-state classifier (needs git) — clean / modified / untracked
+if command -v git >/dev/null 2>&1; then
+    for gs in gclean gmod guntr; do
+        mkdir -p "$TMP/$gs"
+        ( cd "$TMP/$gs" && git init -q && git config user.email a@b.c && git config user.name t \
+          && echo x > f && git add f && git commit -qm init ) >/dev/null 2>&1
+    done
+    ( cd "$TMP/gmod" && echo y >> f ) >/dev/null 2>&1
+    ( cd "$TMP/guntr" && echo z > brandnew ) >/dev/null 2>&1
+    [ "$(__bettercd_gitclass "$TMP/gclean")" = clean ]; check "gitclass: clean repo" $?
+    [ "$(__bettercd_gitclass "$TMP/gmod")" = mod ];     check "gitclass: tracked modification" $?
+    [ "$(__bettercd_gitclass "$TMP/guntr")" = untr ];   check "gitclass: untracked wins" $?
+    [ -z "$(__bettercd_gitclass "$TMP/dv2")" ];         check "gitclass: non-git dir is blank" $?
+fi
+
+# 28g. metadata caches populate once and are reused (idempotent records)
+_BETTERCD_C=""; _BETTERCD_D=""
+__bettercd_meta_c "$TMP/dv"; c1="$_bcd_c_proj"
+__bettercd_meta_c "$TMP/dv"; [ "$_bcd_c_proj" = "$c1" ] && [ "$c1" = 1 ]
+check "meta_c: project flag cached and stable" $?
+recs="$(printf '%s' "$_BETTERCD_C" | grep -c "$TMP/dv")"
+[ "$recs" -eq 1 ]; check "meta_c: one cache record per path" $?
+__bettercd_meta_inval "$TMP/dv"
+case "$_BETTERCD_C" in *"$TMP/dv"*) bad "meta_inval: drops the record" ;; *) ok ;; esac
+
+# 28h. F6 name sort keeps EVERY entry (regression: an unterminated last line was
+# dropped by the sort's while-read before the trailing-newline fix)
+sorted="$(printf '%s\n' "$TMP/zeb
+$TMP/alp
+$TMP/mid" | __bettercd_sort_name)"
+cnt="$(printf '%s\n' "$sorted" | grep -c .)"
+[ "$cnt" -eq 3 ]; check "sort-name: keeps all entries (no last-line drop)" $?
+case "$sorted" in "$TMP/alp"*) ok ;; *) bad "sort-name: alphabetical order" ;; esac
+
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
 rm -rf "$TMP"

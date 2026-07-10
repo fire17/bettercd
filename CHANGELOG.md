@@ -1,10 +1,49 @@
 # Changelog
 
-## Unreleased (v0.11.0)
+## Unreleased (v0.12.0)
 
-- Menu: fixed 12-row window; wheel smooth-scrolls the viewport only
-  (selection stays anchored; footer indicators track position); hovering
-  selects the row under the pointer; click still cds, right-click cancels.
+- **The dropdown is now a places workbench.** The `cd --` menu grew a full,
+  blazingly-fast row model — every expensive fact (git status, tags, mtime) is
+  computed only for rows you actually look at, once, then cached as pure string
+  lookups; the hot key loop stays fork-free (measured: 40-dir menu builds in
+  ~29 ms, a filter keystroke over 100 dirs in ~9 ms).
+  - **`p` pin / unpin** the selected dir. Pins float to the very top (above
+    OLDPWD) in pin order, get a distinct `⚑` gutter, and grow the window (12 +
+    #pins). They **persist** to `~/.config/bettercd/pins` (one path per line,
+    written atomically via temp-file + `mv`), loaded once per menu open.
+  - **`t` mark project** — creates a `.project/` directory (with an empty
+    `status` file) in the selected dir if absent; if already present it just
+    flashes the row (never deletes — it is a marker).
+  - **Bold projects** — any row whose dir contains `.project` (dir or file)
+    renders bold with a `▪` marker.
+  - **Git-state colors** — dirs with `.git` colour their path by porcelain
+    state: green `●` clean, yellow `◐` tracked-modifications, orange `○`
+    untracked. Precedence: **untracked wins over modified wins over clean**
+    (one `git status --porcelain | head -40` per git dir, cheap-gated by
+    `[ -d .git ]`, computed lazily as rows scroll into view).
+  - **`v` table view** — toggles a detail table: gutter · state icon · name ·
+    modified date · version (`.project` `version:` line, else latest git tag) ·
+    shipped (`✓`/`✗` from `last_shipped:` vs `version:`).
+  - **`r` sort** cycles recent → name (A-Z) → modified (newest first); the
+    footer shows the active key. Pins always float above the sort.
+  - **`l` preset** cycles all → projects → git → pinned.
+  - **`/` or just start typing → fuzzy find.** Case-insensitive subsequence
+    match over the pool, live per keystroke, zero forks. If a query stays thin
+    (<5 hits, ≥3 chars), a brief typing **pause** extends the search via
+    `zoxide query --list` then a bounded `find "$HOME"` — extra hits appended as
+    dim `+` rows. `esc` clears the query, a second `esc` cancels.
+  - **`?` help overlay**, **`u`** cd to the selection's parent, **`.`** toggle
+    full vs home-relative paths, **`o`** reveal in Finder (macOS).
+- Fixed a latent number-key bug (`1`-`9` row-jump used an unset variable, so it
+  always jumped to the first visible row).
+- Robustness: name-sort no longer drops a pool's last entry (unterminated
+  command-substitution line), and the table's truncation ellipsis is built via
+  `printf` (a raw multibyte literal concatenated into a var is mangled by
+  non-interactive bash).
+- Menu (earlier in this cycle): fixed 12-row window; wheel smooth-scrolls the
+  viewport only (selection stays anchored; footer indicators track position);
+  hovering selects the row under the pointer; click still cds, right-click
+  cancels.
 
 
 ## v0.10.0 — 2026-07-10

@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.11.0-dev"
+BETTERCD_VERSION="0.12.0-dev"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -111,6 +111,10 @@ __bettercd_clear_miss() { _BETTERCD_LAST_MISS=""; }
 # control chars, computed once at source time (menus build frames fork-free)
 _BETTERCD_ESC="$(printf '\033')"
 _BETTERCD_CR="$(printf '\r')"
+_BETTERCD_TAB="$(printf '\t')"
+# ellipsis built via printf (not a source literal): non-interactive bash mangles
+# multibyte literals concatenated into a var, but a printf-built var is safe.
+_BETTERCD_ELL="$(printf '\342\200\246')"
 
 # builtin single-byte tty readers — no dd fork, no stty juggling per key.
 # $1 = timeout in seconds ('' = block). Sets _bcd_key ('' on timeout/EOF).
@@ -601,79 +605,592 @@ $1
 __BCD_EOF__
 }
 
-# Draw the whole menu (header + rows) to /dev/tty. Raw mode ⇒ lines end \r\n.
-# The selected row's ✻ cycles the sparkle palette by $4 for a little delight.
-__bettercd_menu_draw() { # $1 disp-list, $2 count, $3 selected, $4 frame, $5 offset, $6 visible
-    # ZERO forks: iterate precomputed display rows (string ops only), build the
-    # whole frame — CRLF line endings for raw mode included — in one variable,
-    # write it with ONE printf. Selected and unselected rows share the same
-    # 2-char gutter so the text never jumps.
-    case $(( $4 % 4 )) in
+# --- F1-F7 row model: pins, lazy metadata caches, fuzzy filter ---------------
+# Everything here obeys the perf law: expensive facts (git status, tags, mtime)
+# are computed ONLY for rows that actually get looked at, ONLY once, cached in
+# session vars keyed by path; every cache lookup and every per-keystroke filter
+# is a pure string operation with zero forks.
+
+# The pins file: one absolute path per line. Loaded once per menu open, written
+# atomically (temp + mv) on every toggle so a crash mid-write never truncates it.
+__bettercd_pins_file() { printf '%s/bettercd/pins' "${XDG_CONFIG_HOME:-$HOME/.config}"; }
+
+__bettercd_pins_load() {
+    [ -n "${_BETTERCD_PINS_LOADED-}" ] && return 0
+    _BETTERCD_PINS_LOADED=1
+    _BETTERCD_PINS=""
+    _bcd_pf="$(__bettercd_pins_file)"
+    [ -f "$_bcd_pf" ] || return 0
+    while IFS= read -r _bcd_pl; do
+        [ -n "$_bcd_pl" ] || continue
+        _BETTERCD_PINS="$_BETTERCD_PINS$_bcd_pl
+"
+    done < "$_bcd_pf"
+    return 0
+}
+
+# Pins are newline-TERMINATED entries, so the leading-newline membership test
+# delimits every one exactly (same convention the pool builder uses).
+__bettercd_is_pinned() { # $1 path → rc0 if pinned
+    case "
+${_BETTERCD_PINS-}" in *"
+$1
+"*) return 0 ;; esac
+    return 1
+}
+
+__bettercd_pin_toggle() { # $1 real path → flip pin state, persist atomically
+    __bettercd_pins_load
+    if __bettercd_is_pinned "$1"; then
+        _bcd_np=""
+        while IFS= read -r _bcd_pl; do
+            [ -n "$_bcd_pl" ] || continue
+            [ "$_bcd_pl" = "$1" ] && continue
+            _bcd_np="$_bcd_np$_bcd_pl
+"
+        done <<__BCD_EOF__
+${_BETTERCD_PINS-}
+__BCD_EOF__
+        _BETTERCD_PINS="$_bcd_np"
+    else
+        _BETTERCD_PINS="${_BETTERCD_PINS-}$1
+"
+    fi
+    _bcd_pf="$(__bettercd_pins_file)"
+    command mkdir -p -- "${_bcd_pf%/*}" 2>/dev/null
+    _bcd_ptmp="$_bcd_pf.$$"
+    if printf '%s' "${_BETTERCD_PINS-}" > "$_bcd_ptmp" 2>/dev/null; then
+        command mv -f "$_bcd_ptmp" "$_bcd_pf" 2>/dev/null
+    fi
+    return 0
+}
+
+# F2: mark the dir as a project — create .project/ + an empty status file if
+# absent. Never deletes (it is a marker). rc0 = created, rc1 = already there.
+__bettercd_project_mark() { # $1 dir
+    [ -e "$1/.project" ] && return 1
+    command mkdir -p -- "$1/.project" 2>/dev/null || return 1
+    : > "$1/.project/status" 2>/dev/null
+    return 0
+}
+
+# F4 git state classifier: clean|mod|untr|'' (empty = not a git dir). Cheap gate
+# ([ -d .git ]) before the one git invocation. Precedence: untracked wins over
+# tracked-mods (orange > yellow), clean only when porcelain is empty.
+__bettercd_gitclass() { # $1 dir → prints clean|mod|untr|''
+    [ -d "$1/.git" ] || return 0
+    _bcd_gc_u=0; _bcd_gc_m=0
+    while IFS= read -r _bcd_gc_l; do
+        [ -n "$_bcd_gc_l" ] || continue
+        case "$_bcd_gc_l" in
+            '??'*) _bcd_gc_u=1 ;;
+            *)     _bcd_gc_m=1 ;;
+        esac
+    done <<__BCD_EOF__
+$(command git -C "$1" --no-optional-locks status --porcelain 2>/dev/null | head -40)
+__BCD_EOF__
+    if [ "$_bcd_gc_u" = 1 ]; then printf untr
+    elif [ "$_bcd_gc_m" = 1 ]; then printf mod
+    else printf clean; fi
+}
+
+# F5 mtime (portable BSD/GNU): YYYY-MM-DD of the dir, '-' if unreadable.
+__bettercd_rowmtime() { # $1 dir
+    _bcd_mt="$(command stat -f '%Sm' -t '%Y-%m-%d' "$1" 2>/dev/null)"
+    [ -n "$_bcd_mt" ] || _bcd_mt="$(command stat -c '%y' "$1" 2>/dev/null)"
+    _bcd_mt="${_bcd_mt%% *}"
+    [ -n "$_bcd_mt" ] || _bcd_mt="-"
+    printf '%s' "$_bcd_mt"
+}
+
+# F5 version: .project/status `version:` line, else latest git tag, else '-'.
+__bettercd_rowver() { # $1 dir
+    if [ -f "$1/.project/status" ]; then
+        _bcd_rv=""
+        while IFS= read -r _bcd_rvl; do
+            case "$_bcd_rvl" in
+                version:*) _bcd_rv="${_bcd_rvl#version:}"; _bcd_rv="${_bcd_rv# }"; break ;;
+            esac
+        done < "$1/.project/status"
+        if [ -n "$_bcd_rv" ]; then printf '%s' "${_bcd_rv%% *}"; return 0; fi
+    fi
+    if [ -d "$1/.git" ]; then
+        _bcd_rv="$(command git -C "$1" describe --tags --abbrev=0 2>/dev/null)"
+        if [ -n "$_bcd_rv" ]; then printf '%s' "$_bcd_rv"; return 0; fi
+    fi
+    printf '%s' '-'
+}
+
+# F5 shipped: y if .project/status last_shipped: == version:, n otherwise, ''
+# when there is no .project marker at all (so the column stays blank for plain dirs).
+__bettercd_rowshipped() { # $1 dir → y|n|''
+    [ -e "$1/.project" ] || return 0
+    _bcd_sv=""; _bcd_sl=""
+    if [ -f "$1/.project/status" ]; then
+        while IFS= read -r _bcd_ssl; do
+            case "$_bcd_ssl" in
+                version:*)      _bcd_sv="${_bcd_ssl#version:}"; _bcd_sv="${_bcd_sv# }"; _bcd_sv="${_bcd_sv%% *}" ;;
+                last_shipped:*) _bcd_sl="${_bcd_ssl#last_shipped:}"; _bcd_sl="${_bcd_sl# }"; _bcd_sl="${_bcd_sl%% *}" ;;
+            esac
+        done < "$1/.project/status"
+    fi
+    if [ -n "$_bcd_sv" ] && [ "$_bcd_sv" = "$_bcd_sl" ]; then printf y; else printf n; fi
+}
+
+# Color/bold cache (both views): "<git> <proj>\t<path>". git∈clean|mod|untr|-,
+# proj∈0|1. One [ -d .git ] + at most one git status + one [ -e .project ] per
+# path, EVER. Populated lazily as rows become visible.
+__bettercd_meta_c() { # $1 dir → ensures _BETTERCD_C; sets _bcd_c_git _bcd_c_proj
+    _bcd_c_want="$_BETTERCD_TAB$1"
+    while IFS= read -r _bcd_c_l; do
+        case "$_bcd_c_l" in
+            *"$_bcd_c_want")
+                _bcd_c_f="${_bcd_c_l%%"$_BETTERCD_TAB"*}"
+                _bcd_c_git="${_bcd_c_f%% *}"; _bcd_c_proj="${_bcd_c_f##* }"
+                return 0 ;;
+        esac
+    done <<__BCD_EOF__
+${_BETTERCD_C-}
+__BCD_EOF__
+    _bcd_c_git="$(__bettercd_gitclass "$1")"; [ -n "$_bcd_c_git" ] || _bcd_c_git="-"
+    if [ -e "$1/.project" ]; then _bcd_c_proj=1; else _bcd_c_proj=0; fi
+    _BETTERCD_C="${_BETTERCD_C-}$_bcd_c_git $_bcd_c_proj$_BETTERCD_TAB$1
+"
+    return 0
+}
+
+# Detail cache (table view only): "<mtime> <ver> <ship>\t<path>". Computed only
+# when a row is drawn in detail mode, so compact mode never pays for tags/mtime.
+__bettercd_meta_d() { # $1 dir → ensures _BETTERCD_D; sets _bcd_d_mt _bcd_d_ver _bcd_d_ship
+    _bcd_d_want="$_BETTERCD_TAB$1"
+    while IFS= read -r _bcd_d_l; do
+        case "$_bcd_d_l" in
+            *"$_bcd_d_want")
+                _bcd_d_f="${_bcd_d_l%%"$_BETTERCD_TAB"*}"
+                _bcd_d_mt="${_bcd_d_f%% *}"
+                _bcd_d_rest="${_bcd_d_f#* }"
+                _bcd_d_ver="${_bcd_d_rest%% *}"; _bcd_d_ship="${_bcd_d_rest##* }"
+                return 0 ;;
+        esac
+    done <<__BCD_EOF__
+${_BETTERCD_D-}
+__BCD_EOF__
+    _bcd_d_mt="$(__bettercd_rowmtime "$1")"
+    _bcd_d_ver="$(__bettercd_rowver "$1")"
+    _bcd_d_ship="$(__bettercd_rowshipped "$1")"; [ -n "$_bcd_d_ship" ] || _bcd_d_ship="-"
+    _BETTERCD_D="${_BETTERCD_D-}$_bcd_d_mt $_bcd_d_ver $_bcd_d_ship$_BETTERCD_TAB$1
+"
+    return 0
+}
+
+# Drop a path's cached color/detail records so the next draw recomputes them —
+# used after `t` marks a dir a project (its bold/icon/version must refresh).
+__bettercd_meta_inval() { # $1 dir
+    _bcd_mi_want="$_BETTERCD_TAB$1"
+    _bcd_mi_c=""
+    while IFS= read -r _bcd_mi_l; do
+        [ -n "$_bcd_mi_l" ] || continue
+        case "$_bcd_mi_l" in *"$_bcd_mi_want") continue ;; esac
+        _bcd_mi_c="$_bcd_mi_c$_bcd_mi_l
+"
+    done <<__BCD_EOF__
+${_BETTERCD_C-}
+__BCD_EOF__
+    _BETTERCD_C="$_bcd_mi_c"
+    _bcd_mi_d=""
+    while IFS= read -r _bcd_mi_l; do
+        [ -n "$_bcd_mi_l" ] || continue
+        case "$_bcd_mi_l" in *"$_bcd_mi_want") continue ;; esac
+        _bcd_mi_d="$_bcd_mi_d$_bcd_mi_l
+"
+    done <<__BCD_EOF__
+${_BETTERCD_D-}
+__BCD_EOF__
+    _BETTERCD_D="$_bcd_mi_d"
+}
+
+# F7 fuzzy subsequence match — pure, fork-free, shell-agnostic. Both args must
+# already be lowercased (the loop pre-lowercases haystacks once at build and the
+# query once per keystroke, so per-keystroke filtering over the whole pool costs
+# zero forks). Walks the query char by char, advancing past each match in the
+# haystack. The `*"$c"*` patterns are literal globs in the SOURCE, so zsh treats
+# them as patterns (unlike a whole pattern taken from a variable, which zsh only
+# globs with $~ — the reason we avoid variable case-patterns here).
+__bettercd_subseq() { # $1 lc-query, $2 lc-haystack → rc0 if subsequence
+    _bcd_sq_q="$1"; _bcd_sq_h="$2"
+    [ -n "$_bcd_sq_q" ] || return 0
+    while [ -n "$_bcd_sq_q" ]; do
+        _bcd_sq_c="${_bcd_sq_q%"${_bcd_sq_q#?}"}"   # first query char
+        case "$_bcd_sq_h" in
+            *"$_bcd_sq_c"*) _bcd_sq_h="${_bcd_sq_h#*"$_bcd_sq_c"}"; _bcd_sq_q="${_bcd_sq_q#?}" ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# Testable case-insensitive matcher (lowercases both sides itself).
+__bettercd_fuzzy() { # $1 query, $2 haystack → rc0 if subsequence match
+    [ -n "$1" ] || return 0
+    _bcd_fz_q="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    _bcd_fz_h="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    __bettercd_subseq "$_bcd_fz_q" "$_bcd_fz_h"
+}
+
+# Sort a newline path list by basename, case-insensitive A-Z. One sort fork,
+# only when the user cycles to name-sort (never on the arrow-key hot path).
+__bettercd_sort_name() { # stdin: paths → stdout: name-sorted paths
+    while IFS= read -r _bcd_snl; do
+        [ -n "$_bcd_snl" ] || continue
+        printf '%s%s%s\n' "${_bcd_snl##*/}" "$_BETTERCD_TAB" "$_bcd_snl"
+    done | LC_ALL=C command sort -f | while IFS= read -r _bcd_snk; do
+        printf '%s\n' "${_bcd_snk#*"$_BETTERCD_TAB"}"
+    done
+}
+
+# Pure (fork-free) lowercase — a 26-arm translation, one char at a time. Used to
+# lowercase display paths for the filter so per-keystroke matching stays forkless.
+__bettercd_lc() { # $1 → sets _bcd_lc
+    _bcd_lc=""; _bcd_lc_r="$1"
+    while [ -n "$_bcd_lc_r" ]; do
+        _bcd_lc_c="${_bcd_lc_r%"${_bcd_lc_r#?}"}"; _bcd_lc_r="${_bcd_lc_r#?}"
+        case "$_bcd_lc_c" in
+            A) _bcd_lc_c=a ;; B) _bcd_lc_c=b ;; C) _bcd_lc_c=c ;; D) _bcd_lc_c=d ;;
+            E) _bcd_lc_c=e ;; F) _bcd_lc_c=f ;; G) _bcd_lc_c=g ;; H) _bcd_lc_c=h ;;
+            I) _bcd_lc_c=i ;; J) _bcd_lc_c=j ;; K) _bcd_lc_c=k ;; L) _bcd_lc_c=l ;;
+            M) _bcd_lc_c=m ;; N) _bcd_lc_c=n ;; O) _bcd_lc_c=o ;; P) _bcd_lc_c=p ;;
+            Q) _bcd_lc_c=q ;; R) _bcd_lc_c=r ;; S) _bcd_lc_c=s ;; T) _bcd_lc_c=t ;;
+            U) _bcd_lc_c=u ;; V) _bcd_lc_c=v ;; W) _bcd_lc_c=w ;; X) _bcd_lc_c=x ;;
+            Y) _bcd_lc_c=y ;; Z) _bcd_lc_c=z ;;
+        esac
+        _bcd_lc="$_bcd_lc$_bcd_lc_c"
+    done
+}
+
+# Pad/truncate a string to N display chars, into _bcd_pad_out (no fork — called
+# per visible row while drawing the detail table). Truncates with an ellipsis.
+__bettercd_pad() { # $1 str, $2 width
+    _bcd_pad_out=""; _bcd_pad_r="$1"; _bcd_pad_i=0
+    if [ "${#1}" -gt "$2" ]; then
+        while [ "$_bcd_pad_i" -lt $(( $2 - 1 )) ]; do
+            _bcd_pad_c="${_bcd_pad_r%"${_bcd_pad_r#?}"}"; _bcd_pad_r="${_bcd_pad_r#?}"
+            _bcd_pad_out="$_bcd_pad_out$_bcd_pad_c"; _bcd_pad_i=$((_bcd_pad_i + 1))
+        done
+        _bcd_pad_out="$_bcd_pad_out$_BETTERCD_ELL"
+    else
+        _bcd_pad_out="$1"; _bcd_pad_i="${#1}"
+        while [ "$_bcd_pad_i" -lt "$2" ]; do _bcd_pad_out="$_bcd_pad_out "; _bcd_pad_i=$((_bcd_pad_i + 1)); done
+    fi
+}
+
+# F6 modified-sort: order the pool newest-first by dir mtime. mtimes are pulled
+# through the detail cache (so they are computed at most once), then a single
+# sort fork orders them — only when the user first selects this sort, never on
+# the arrow-key hot path.
+__bettercd_menu_sort_mtime() { # sets _bcd_ml_op
+    _bcd_smt=""
+    while IFS= read -r _bcd_smp; do
+        [ -n "$_bcd_smp" ] || continue
+        __bettercd_meta_d "$_bcd_smp"
+        _bcd_smt="$_bcd_smt$_bcd_d_mt$_BETTERCD_TAB$_bcd_smp
+"
+    done <<__BCD_EOF__
+$_bcd_ml_pool
+__BCD_EOF__
+    _bcd_ml_op="$(printf '%s' "$_bcd_smt" | LC_ALL=C command sort -r | while IFS= read -r _bcd_sml; do
+        [ -n "$_bcd_sml" ] && printf '%s\n' "${_bcd_sml#*"$_BETTERCD_TAB"}"
+    done)"
+}
+
+# Emit one base row: <realpath>\t<display>\t<extflag>\t<lc-realpath>. Display is
+# home-relative unless the full-path toggle (F8 `.`) is on. lc is precomputed
+# here (once per stage-A rebuild) so the filter never lowercases in the hot loop.
+__bettercd_stageA_emit() { # $1 path, $2 extflag
+    if [ "${_bcd_ml_full-0}" = 1 ]; then _bcd_ed="$1"
+    else
+        case "$1" in
+            "$HOME")   _bcd_ed="~" ;;
+            "$HOME"/*) _bcd_ed="~${1#"$HOME"}" ;;
+            *)         _bcd_ed="$1" ;;
+        esac
+    fi
+    __bettercd_lc "$1"
+    _bcd_ml_base="$_bcd_ml_base$1$_BETTERCD_TAB$_bcd_ed$_BETTERCD_TAB$2$_BETTERCD_TAB$_bcd_lc
+"
+    _bcd_ml_seen="$_bcd_ml_seen$1
+"
+}
+
+# Stage A (rare — only on open / sort / pin / full-path / extend changes): build
+# the ordered base list. Pins float to the very top in pin order (above OLDPWD),
+# then the sorted pool (non-pinned), then de-duplicated extension results.
+__bettercd_menu_stageA() {
+    _bcd_ml_base=""; _bcd_ml_seen=""
+    case "$_bcd_ml_sort" in
+        name)     _bcd_ml_op="$(printf '%s\n' "$_bcd_ml_pool" | __bettercd_sort_name)" ;;
+        modified) __bettercd_menu_sort_mtime ;;
+        *)        _bcd_ml_op="$_bcd_ml_pool" ;;
+    esac
+    while IFS= read -r _bcd_ap; do
+        [ -n "$_bcd_ap" ] || continue
+        [ -d "$_bcd_ap" ] || continue
+        [ "$_bcd_ap" = "$PWD" ] && continue
+        case "
+$_bcd_ml_seen" in *"
+$_bcd_ap
+"*) continue ;; esac
+        __bettercd_stageA_emit "$_bcd_ap" 0
+    done <<__BCD_EOF__
+${_BETTERCD_PINS-}
+__BCD_EOF__
+    while IFS= read -r _bcd_ap; do
+        [ -n "$_bcd_ap" ] || continue
+        case "
+$_bcd_ml_seen" in *"
+$_bcd_ap
+"*) continue ;; esac
+        __bettercd_stageA_emit "$_bcd_ap" 0
+    done <<__BCD_EOF__
+$_bcd_ml_op
+__BCD_EOF__
+    while IFS= read -r _bcd_ap; do
+        [ -n "$_bcd_ap" ] || continue
+        [ "$_bcd_ap" = "$PWD" ] && continue
+        [ -d "$_bcd_ap" ] || continue
+        case "
+$_bcd_ml_seen" in *"
+$_bcd_ap
+"*) continue ;; esac
+        __bettercd_stageA_emit "$_bcd_ap" 1
+    done <<__BCD_EOF__
+${_bcd_ml_ext-}
+__BCD_EOF__
+    # count the base (pre-filter) rows — the window height is sized to THIS, not
+    # to the filtered count, so typing a filter never changes the height (and so
+    # never triggers a CPR re-measure that would swallow fast-typed keystrokes).
+    _bcd_ml_basen=0
+    while IFS= read -r _bcd_bn; do [ -n "$_bcd_bn" ] && _bcd_ml_basen=$((_bcd_ml_basen + 1)); done <<__BCD_EOF__
+$_bcd_ml_base
+__BCD_EOF__
+}
+
+# Stage B (per keystroke while filtering): filter the base list by the active
+# preset AND fuzzy query into the drawable row list. Both are pure string ops —
+# preset uses builtin [ -e ]/[ -d ] tests, the query a fork-free subsequence
+# walk over the precomputed lowercase paths. Zero forks over the whole pool.
+__bettercd_menu_stageB() {
+    _bcd_ml_rows=""; _bcd_ml_list=""; _bcd_ml_n=0
+    _bcd_ml_lcq=""
+    if [ -n "$_bcd_ml_query" ]; then __bettercd_lc "$_bcd_ml_query"; _bcd_ml_lcq="$_bcd_lc"; fi
+    while IFS= read -r _bcd_br; do
+        [ -n "$_bcd_br" ] || continue
+        _bcd_brp="${_bcd_br%%"$_BETTERCD_TAB"*}"
+        _bcd_brest="${_bcd_br#*"$_BETTERCD_TAB"}"
+        _bcd_bd="${_bcd_brest%%"$_BETTERCD_TAB"*}"
+        _bcd_brest="${_bcd_brest#*"$_BETTERCD_TAB"}"
+        _bcd_bx="${_bcd_brest%%"$_BETTERCD_TAB"*}"
+        _bcd_blow="${_bcd_brest#*"$_BETTERCD_TAB"}"
+        case "$_bcd_ml_preset" in
+            proj)   [ -e "$_bcd_brp/.project" ] || continue ;;
+            git)    [ -d "$_bcd_brp/.git" ] || continue ;;
+            pinned) __bettercd_is_pinned "$_bcd_brp" || continue ;;
+        esac
+        if [ -n "$_bcd_ml_lcq" ]; then
+            __bettercd_subseq "$_bcd_ml_lcq" "$_bcd_blow" || continue
+        fi
+        _bcd_ml_rows="$_bcd_ml_rows$_bcd_brp$_BETTERCD_TAB$_bcd_bd$_BETTERCD_TAB$_bcd_bx
+"
+        _bcd_ml_list="$_bcd_ml_list$_bcd_brp
+"
+        _bcd_ml_n=$((_bcd_ml_n + 1))
+    done <<__BCD_EOF__
+$_bcd_ml_base
+__BCD_EOF__
+    [ "$_bcd_ml_sel" -ge "$_bcd_ml_n" ] && _bcd_ml_sel=$(( _bcd_ml_n - 1 ))
+    [ "$_bcd_ml_sel" -lt 0 ] && _bcd_ml_sel=0
+    __bettercd_menu_geom
+}
+
+# Window geometry: 12 rows + one per pin, clamped to the terminal height, then
+# clamped to the row count. Keeps the selection inside the viewport.
+__bettercd_menu_geom() {
+    _bcd_np=0
+    while IFS= read -r _bcd_gl; do [ -n "$_bcd_gl" ] && _bcd_np=$((_bcd_np + 1)); done <<__BCD_EOF__
+${_BETTERCD_PINS-}
+__BCD_EOF__
+    _bcd_ml_vis=$(( 12 + _bcd_np ))
+    _bcd_lmax="${LINES:-24}"; _bcd_lmax=$((_bcd_lmax - 6))
+    [ "$_bcd_lmax" -ge 5 ] || _bcd_lmax=5
+    [ "$_bcd_ml_vis" -le "$_bcd_lmax" ] || _bcd_ml_vis="$_bcd_lmax"
+    # clamp to the UNFILTERED base count (stable while filtering), not the live
+    # filtered count — keeps the height fixed so a filter keystroke never remeasures
+    [ "$_bcd_ml_vis" -le "${_bcd_ml_basen:-0}" ] || _bcd_ml_vis="${_bcd_ml_basen:-0}"
+    [ "$_bcd_ml_vis" -ge 1 ] || _bcd_ml_vis=1
+    _bcd_ml_lines=$(( _bcd_ml_vis + 2 ))
+    [ "$_bcd_ml_off" -gt $(( _bcd_ml_n - _bcd_ml_vis )) ] && _bcd_ml_off=$(( _bcd_ml_n - _bcd_ml_vis ))
+    [ "$_bcd_ml_off" -lt 0 ] && _bcd_ml_off=0
+    [ "$_bcd_ml_sel" -lt "$_bcd_ml_off" ] && _bcd_ml_off="$_bcd_ml_sel"
+    [ "$_bcd_ml_sel" -ge $(( _bcd_ml_off + _bcd_ml_vis )) ] && _bcd_ml_off=$(( _bcd_ml_sel - _bcd_ml_vis + 1 ))
+}
+
+# Move the selection onto a specific path after a rebuild (selection follows the
+# item when pinning re-orders it), else leave the clamped selection.
+__bettercd_menu_reselect() { # $1 path
+    _bcd_ri=0; _bcd_rfound=-1
+    while IFS= read -r _bcd_rl; do
+        [ -n "$_bcd_rl" ] || continue
+        [ "$_bcd_rl" = "$1" ] && { _bcd_rfound="$_bcd_ri"; break; }
+        _bcd_ri=$((_bcd_ri + 1))
+    done <<__BCD_EOF__
+$_bcd_ml_list
+__BCD_EOF__
+    [ "$_bcd_rfound" -ge 0 ] && _bcd_ml_sel="$_bcd_rfound"
+}
+
+# F7 extension: when the local pool is thin for a query, reach further — zoxide's
+# db first, then a bounded $HOME find (pipe-close kills find early). Results feed
+# stage A as dim `+` rows. Runs only on a typing pause, once per query.
+__bettercd_menu_extend() { # $1 query
+    _bcd_ml_ext=""
+    if command -v zoxide >/dev/null 2>&1; then
+        while IFS= read -r _bcd_xl; do
+            [ -n "$_bcd_xl" ] || continue
+            [ -d "$_bcd_xl" ] || continue
+            _bcd_ml_ext="$_bcd_ml_ext$_bcd_xl
+"
+        done <<__BCD_EOF__
+$(command zoxide query --list "$1" 2>/dev/null | head -15)
+__BCD_EOF__
+    fi
+    while IFS= read -r _bcd_xf; do
+        [ -n "$_bcd_xf" ] || continue
+        _bcd_ml_ext="$_bcd_ml_ext$_bcd_xf
+"
+    done <<__BCD_EOF__
+$(command find "$HOME" -maxdepth 4 -type d -iname "*$1*" 2>/dev/null | head -15)
+__BCD_EOF__
+    _bcd_ml_extq="$1"
+}
+
+# Draw the whole menu (header + window + footer) to /dev/tty in ONE printf. Raw
+# mode ⇒ lines end \r\n. Reads state from the loop's globals (no `local` here, so
+# they are shared). Per-visible-row facts come from the lazy caches: git state,
+# project marker, and (detail view only) mtime/version/shipped — each computed at
+# most once when a row first becomes visible, then pure string lookups forever.
+__bettercd_menu_draw() {
+    case $(( _bcd_ml_frame % 4 )) in
         0) _bcd_dc=213 ;; 1) _bcd_dc=219 ;; 2) _bcd_dc=177 ;; 3) _bcd_dc=225 ;;
     esac
     _bcd_dE="$_BETTERCD_ESC"
     _bcd_dL="$_BETTERCD_CR
 "
-    _bcd_df="${_bcd_dE}[38;5;213m✻${_bcd_dE}[0m ${_bcd_dE}[2mrecent places  ↑↓·wheel · ⏎·click cd · esc${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
-    _bcd_di=0; _bcd_dend=$(( $5 + $6 ))
-    while IFS= read -r _bcd_dp; do
-        [ -n "$_bcd_dp" ] || continue
-        if [ "$_bcd_di" -ge "$5" ] && [ "$_bcd_di" -lt "$_bcd_dend" ]; then
-            if [ "$_bcd_di" = "$3" ]; then
-                _bcd_df="$_bcd_df${_bcd_dE}[38;5;${_bcd_dc}m✻${_bcd_dE}[0m ${_bcd_dE}[1;36m$_bcd_dp${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+    if [ "$_bcd_ml_table" = 1 ]; then
+        _bcd_df="${_bcd_dE}[2m    name                  modified     version    ✓${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+    elif [ -n "$_bcd_ml_query" ]; then
+        _bcd_df="${_bcd_dE}[38;5;213m⌕${_bcd_dE}[0m ${_bcd_dE}[1;36m$_bcd_ml_query${_bcd_dE}[0m ${_bcd_dE}[2m· type to filter · esc clears${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+    else
+        _bcd_df="${_bcd_dE}[38;5;213m✻${_bcd_dE}[0m ${_bcd_dE}[2mrecent  ↑↓ move · ⏎ cd · p pin · t mark · v table · r sort · l preset · / find · ? help${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+    fi
+    _bcd_di=0; _bcd_dend=$(( _bcd_ml_off + _bcd_ml_vis )); _bcd_demit=0
+    while IFS= read -r _bcd_drow; do
+        [ -n "$_bcd_drow" ] || continue
+        if [ "$_bcd_di" -ge "$_bcd_ml_off" ] && [ "$_bcd_di" -lt "$_bcd_dend" ]; then
+            _bcd_drp="${_bcd_drow%%"$_BETTERCD_TAB"*}"
+            _bcd_drest="${_bcd_drow#*"$_BETTERCD_TAB"}"
+            _bcd_ddisp="${_bcd_drest%%"$_BETTERCD_TAB"*}"
+            _bcd_dext="${_bcd_drest##*"$_BETTERCD_TAB"}"
+            __bettercd_meta_c "$_bcd_drp"
+            case "$_bcd_c_git" in
+                clean) _bcd_dcol=40 ;;
+                mod)   _bcd_dcol=178 ;;
+                untr)  _bcd_dcol=208 ;;
+                *)     _bcd_dcol="" ;;
+            esac
+            if __bettercd_is_pinned "$_bcd_drp"; then _bcd_dgut="⚑"
+            elif [ "$_bcd_dext" = 1 ]; then _bcd_dgut="+"
+            elif [ "$_bcd_c_git" = clean ]; then _bcd_dgut="●"
+            elif [ "$_bcd_c_git" = mod ]; then _bcd_dgut="◐"
+            elif [ "$_bcd_c_git" = untr ]; then _bcd_dgut="○"
+            elif [ "$_bcd_c_proj" = 1 ]; then _bcd_dgut="▪"
+            else _bcd_dgut="·"; fi
+            _bcd_dbold=""; [ "$_bcd_c_proj" = 1 ] && _bcd_dbold="1;"
+            if [ "$_bcd_ml_table" = 1 ]; then
+                __bettercd_meta_d "$_bcd_drp"
+                _bcd_dship=" "
+                case "$_bcd_d_ship" in y) _bcd_dship="✓" ;; n) _bcd_dship="✗" ;; esac
+                __bettercd_pad "$_bcd_ddisp" 20; _bcd_dnm="$_bcd_pad_out"
+                __bettercd_pad "$_bcd_d_ver" 10; _bcd_dvr="$_bcd_pad_out"
+                _bcd_dtext="$_bcd_dnm  $_bcd_d_mt   $_bcd_dvr $_bcd_dship"
             else
-                _bcd_df="$_bcd_df${_bcd_dE}[2m· $_bcd_dp${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+                _bcd_dtext="$_bcd_ddisp"
             fi
+            if [ "$_bcd_di" = "${_bcd_ml_flashrow:--1}" ]; then
+                # F2: a re-mark of an already-marked dir flashes the row bright
+                _bcd_df="$_bcd_df${_bcd_dE}[38;5;${_bcd_dc}m$_bcd_dgut${_bcd_dE}[0m ${_bcd_dE}[7;1;38;5;220m$_bcd_dtext${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+            elif [ "$_bcd_di" = "$_bcd_ml_sel" ]; then
+                if [ -n "$_bcd_dcol" ]; then _bcd_dsgr="7;${_bcd_dbold}38;5;${_bcd_dcol}"
+                else _bcd_dsgr="7;${_bcd_dbold}36"; fi
+                _bcd_df="$_bcd_df${_bcd_dE}[38;5;${_bcd_dc}m$_bcd_dgut${_bcd_dE}[0m ${_bcd_dE}[${_bcd_dsgr}m$_bcd_dtext${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+            else
+                if [ "$_bcd_dext" = 1 ]; then _bcd_dsgr="2"
+                elif [ -n "$_bcd_dcol" ]; then _bcd_dsgr="${_bcd_dbold}38;5;${_bcd_dcol}"
+                elif [ -n "$_bcd_dbold" ]; then _bcd_dsgr="1"
+                else _bcd_dsgr="2"; fi
+                _bcd_df="$_bcd_df${_bcd_dE}[2m$_bcd_dgut${_bcd_dE}[0m ${_bcd_dE}[${_bcd_dsgr}m$_bcd_dtext${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+            fi
+            _bcd_demit=$((_bcd_demit + 1))
         fi
         _bcd_di=$((_bcd_di + 1))
         [ "$_bcd_di" -ge "$_bcd_dend" ] && break
     done <<__BCD_EOF__
-$1
+$_bcd_ml_rows
 __BCD_EOF__
+    while [ "$_bcd_demit" -lt "$_bcd_ml_vis" ]; do
+        if [ "$_bcd_ml_n" -eq 0 ] && [ "$_bcd_demit" -eq 0 ]; then
+            _bcd_df="$_bcd_df${_bcd_dE}[2m  (no matches — esc clears)${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+        else
+            _bcd_df="$_bcd_df${_bcd_dE}[K$_bcd_dL"
+        fi
+        _bcd_demit=$((_bcd_demit + 1))
+    done
     _bcd_dup=" "; _bcd_ddn=" "
-    [ "$5" -gt 0 ] && _bcd_dup="↑"
-    [ "$_bcd_dend" -lt "$2" ] && _bcd_ddn="↓"
-    _bcd_df="$_bcd_df  ${_bcd_dE}[2m$_bcd_dup $(( $3 + 1 ))/$2 $_bcd_ddn${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+    [ "$_bcd_ml_off" -gt 0 ] && _bcd_dup="↑"
+    [ "$_bcd_dend" -lt "$_bcd_ml_n" ] && _bcd_ddn="↓"
+    _bcd_dpos=$(( _bcd_ml_sel + 1 )); [ "$_bcd_ml_n" -eq 0 ] && _bcd_dpos=0
+    _bcd_dfoot="$_bcd_dup $_bcd_dpos/$_bcd_ml_n $_bcd_ddn  sort:$_bcd_ml_sort"
+    [ "$_bcd_ml_preset" != all ] && _bcd_dfoot="$_bcd_dfoot  ▸$_bcd_ml_preset"
+    [ "$_bcd_ml_table" = 1 ] && _bcd_dfoot="$_bcd_dfoot  detail"
+    _bcd_df="$_bcd_df  ${_bcd_dE}[2m$_bcd_dfoot${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     printf '%s' "$_bcd_df" >/dev/tty
+}
+
+# The help overlay (F8 `?`): erase the menu, print a key cheat-sheet, wait for
+# any key, then let the caller repaint. Drawn as its own modal so it can be
+# taller than the menu without disturbing the geometry.
+__bettercd_menu_help() {
+    _bcd_hE="$_BETTERCD_ESC"; _bcd_hL="$_BETTERCD_CR
+"
+    printf '%s[%dA%s[J' "$_bcd_hE" "$_bcd_ml_lines" "$_bcd_hE" >/dev/tty
+    printf '%s' "\
+${_bcd_hE}[1;36m  ✻ bettercd dropdown — keys${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
+${_bcd_hE}[2m  ↑↓/jk move   ⏎/click cd   1-9 pick   g/G top/bottom${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
+${_bcd_hE}[2m  p pin (float to top, persists)   t mark project (.project/)${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
+${_bcd_hE}[2m  v table view   r sort (recent/name/modified)   l preset${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
+${_bcd_hE}[2m  / or type = fuzzy find   u parent   . full/home path${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
+${_bcd_hE}[2m  o reveal in Finder   esc/q cancel${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
+${_bcd_hE}[2m  ⚑pin ●clean ◐modified ○untracked ▪project +found${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
+${_bcd_hE}[38;5;213m  press any key${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL" >/dev/tty
+    __bettercd_readkey ""
+    printf '%s[8A%s[J' "$_bcd_hE" "$_bcd_hE" >/dev/tty
 }
 
 
 
 # The interactive loop: raw single-byte input, redraw in place, clean erase.
 # stty is restored before EVERY return path (trap-free by design).
-__bettercd_menu_loop() { # $1 list (real paths), $2 count
-    _bcd_ml_list="$1"; _bcd_ml_n="$2"; _bcd_ml_sel=0; _bcd_ml_frame=0; _bcd_ml_off=0
-    _bcd_ml_psel=0; _bcd_ml_poff=0
-    _bcd_ml_vis=12
-    _bcd_ml_lmax="${LINES:-24}"; _bcd_ml_lmax=$((_bcd_ml_lmax - 6))
-    [ "$_bcd_ml_lmax" -ge 5 ] || _bcd_ml_lmax=5
-    [ "$_bcd_ml_vis" -le "$_bcd_ml_lmax" ] || _bcd_ml_vis="$_bcd_ml_lmax"
-    [ "$_bcd_ml_vis" -le "$_bcd_ml_n" ] || _bcd_ml_vis="$_bcd_ml_n"
-    _bcd_ml_lines=$((_bcd_ml_vis + 2))   # header + window + footer
-
-    # precompute display rows ONCE (home-relative) — redraws are then pure
-    # string work: zero forks per frame, zero forks per keypress
-    _bcd_ml_disp=""
-    while IFS= read -r _bcd_ml_r; do
-        [ -n "$_bcd_ml_r" ] || continue
-        case "$_bcd_ml_r" in
-            "$HOME")   _bcd_ml_disp="$_bcd_ml_disp~
-" ;;
-            "$HOME"/*) _bcd_ml_disp="$_bcd_ml_disp~${_bcd_ml_r#"$HOME"}
-" ;;
-            *)         _bcd_ml_disp="$_bcd_ml_disp$_bcd_ml_r
-" ;;
-        esac
-    done <<__BCD_EOF__
-$_bcd_ml_list
-__BCD_EOF__
-
-    _bcd_ml_st="$(command stty -g </dev/tty 2>/dev/null)"
-    [ -n "$_bcd_ml_st" ] || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
-    command stty raw -echo </dev/tty 2>/dev/null
-    printf '\033[?1003h\033[?1006h' >/dev/tty
-    __bettercd_menu_draw "$_bcd_ml_disp" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame" "$_bcd_ml_off" "$_bcd_ml_vis"
-    # menu top row for click mapping: one CPR, read with the builtin reader
+# Measure the menu's top row (one CPR round-trip) so mouse clicks map to rows.
+# Called at open and after any redraw that changes the block's height.
+__bettercd_menu_measure() {
     _bcd_ml_top=""
     printf '\033[6n' >/dev/tty
     _bcd_ml_rep=""; _bcd_ml_i=0
@@ -689,12 +1206,64 @@ __BCD_EOF__
         ''|*[!0-9]*) ;;
         *) _bcd_ml_top=$(( _bcd_ml_rep - _bcd_ml_lines )) ;;
     esac
+}
+
+# Rebuild the view after a state change (sort/preset/pins/query/full-path), then
+# keep the selection glued to the same item it was on. $1 = "A" to also rebuild
+# the (rarer) base list; anything else rebuilds only the filtered rows.
+__bettercd_menu_rebuild() { # $1 = A|B
+    _bcd_ml_curp="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"
+    [ "$1" = A ] && __bettercd_menu_stageA
+    __bettercd_menu_stageB
+    [ -n "$_bcd_ml_curp" ] && __bettercd_menu_reselect "$_bcd_ml_curp"
+    __bettercd_menu_geom
+    _bcd_ml_rebuild=1
+}
+
+# The interactive loop: raw single-byte input, a row model that pins / filters /
+# sorts / marks / colors, redraw in place, clean erase. stty is restored before
+# EVERY return path (trap-free by design).
+__bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (unused)
+    _bcd_ml_pool="$1"
+    _bcd_ml_sel=0; _bcd_ml_frame=0; _bcd_ml_off=0
+    _bcd_ml_psel=-1; _bcd_ml_poff=-1; _bcd_ml_plines=0
+    _bcd_ml_sort=recent; _bcd_ml_preset=all; _bcd_ml_query=""
+    _bcd_ml_table=0; _bcd_ml_full=0; _bcd_ml_fmode=0; _bcd_ml_flashrow=-1
+    _bcd_ml_ext=""; _bcd_ml_extq=""; _bcd_ml_act=""; _bcd_ml_pick_override=""
+    _bcd_ml_darwin=0; [ "$(command uname 2>/dev/null)" = Darwin ] && _bcd_ml_darwin=1
+    __bettercd_pins_load
+    __bettercd_menu_stageA
+    __bettercd_menu_stageB   # sets rows/list/n and geometry
+
+    _bcd_ml_st="$(command stty -g </dev/tty 2>/dev/null)"
+    [ -n "$_bcd_ml_st" ] || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
+    command stty raw -echo </dev/tty 2>/dev/null
+    printf '\033[?1003h\033[?1006h' >/dev/tty
+    __bettercd_menu_draw
+    __bettercd_menu_measure
+    _bcd_ml_plines="$_bcd_ml_lines"; _bcd_ml_psel="$_bcd_ml_sel"; _bcd_ml_poff="$_bcd_ml_off"
 
     _bcd_ml_esc="$_BETTERCD_ESC"; _bcd_ml_cr="$_BETTERCD_CR"
-    _bcd_ml_etx="$(printf '\003')"; _bcd_ml_nl="$(printf '\n')"; _bcd_ml_act=""
+    _bcd_ml_etx="$(printf '\003')"; _bcd_ml_nl="$(printf '\n')"
+    _bcd_ml_bs="$(printf '\177')"; _bcd_ml_bs2="$(printf '\010')"
     while :; do
-        __bettercd_readkey ""
-        _bcd_ml_move=""
+        _bcd_ml_move=""; _bcd_ml_rebuild=""; _bcd_ml_fresh=""; _bcd_ml_skip=0
+        # F7 debounce: while filtering with a thin result set and a ≥3-char query
+        # not yet extended, wait briefly — a typing pause triggers the extension.
+        _bcd_ml_pending=0
+        if [ "$_bcd_ml_fmode" = 1 ] && [ -n "$_bcd_ml_query" ] && [ "$_bcd_ml_n" -lt 5 ] \
+           && [ "${#_bcd_ml_query}" -ge 3 ] && [ "$_bcd_ml_query" != "$_bcd_ml_extq" ]; then
+            _bcd_ml_pending=1
+            __bettercd_readkey 0.4
+        else
+            __bettercd_readkey ""
+        fi
+        if [ -z "$_bcd_key" ] && [ "$_bcd_ml_pending" = 1 ]; then
+            __bettercd_menu_extend "$_bcd_ml_query"
+            __bettercd_menu_rebuild A
+            _bcd_ml_skip=1
+        fi
+        if [ "$_bcd_ml_skip" = 0 ]; then
         case "$_bcd_key" in
             "$_bcd_ml_esc")
                 __bettercd_readkey 0.05; _bcd_ml_s1="$_bcd_key"
@@ -743,26 +1312,99 @@ __BCD_EOF__
                                 2) [ "$_bcd_ml_mf" = M ] && _bcd_ml_act=cancel ;;
                             esac
                         fi ;;
-                    '') _bcd_ml_act=cancel ;;   # bare ESC
+                    '') # bare ESC: in filter mode clears the query first; else cancels
+                        if [ "$_bcd_ml_fmode" = 1 ]; then
+                            _bcd_ml_query=""; _bcd_ml_fmode=0; _bcd_ml_extq=""; _bcd_ml_ext=""
+                            __bettercd_menu_rebuild A
+                        else
+                            _bcd_ml_act=cancel
+                        fi ;;
                     *) ;;
                 esac ;;
-            k|K) _bcd_ml_move=up ;;
-            j|J) _bcd_ml_move=down ;;
-            g) _bcd_ml_sel=0; _bcd_ml_frame=$((_bcd_ml_frame + 1)) ;;
-            G) _bcd_ml_sel=$((_bcd_ml_n - 1)); _bcd_ml_frame=$((_bcd_ml_frame + 1)) ;;
             "$_bcd_ml_cr"|"$_bcd_ml_nl") _bcd_ml_act=select ;;
-            q|Q|"$_bcd_ml_etx") _bcd_ml_act=cancel ;;
-            [1-9])
-                if [ $(( _bcd_ml_off + _bcd_ml_key )) -le "$_bcd_ml_n" ]; then
-                    _bcd_ml_sel=$(( _bcd_ml_off + _bcd_ml_key - 1 )); _bcd_ml_act=select
+            "$_bcd_ml_etx") _bcd_ml_act=cancel ;;
+            *)
+                if [ "$_bcd_ml_fmode" = 1 ]; then
+                    # filter editing: printables extend the query, backspace edits
+                    case "$_bcd_key" in
+                        "$_bcd_ml_bs"|"$_bcd_ml_bs2")
+                            _bcd_ml_query="${_bcd_ml_query%?}"
+                            [ -n "$_bcd_ml_query" ] || _bcd_ml_fmode=0
+                            __bettercd_menu_rebuild B ;;
+                        '') _bcd_ml_act=cancel ;;
+                        [!\ -~]) ;;   # ignore control / multibyte bytes
+                        *) _bcd_ml_query="$_bcd_ml_query$_bcd_key"; __bettercd_menu_rebuild B ;;
+                    esac
+                else
+                    case "$_bcd_key" in
+                        k|K) _bcd_ml_move=up ;;
+                        j|J) _bcd_ml_move=down ;;
+                        g) _bcd_ml_sel=0; _bcd_ml_frame=$((_bcd_ml_frame + 1)) ;;
+                        G) _bcd_ml_sel=$((_bcd_ml_n - 1)); _bcd_ml_frame=$((_bcd_ml_frame + 1)) ;;
+                        q|Q) _bcd_ml_act=cancel ;;
+                        p)  # F1 pin/unpin the selected dir (persists, floats to top)
+                            _bcd_ml_curp="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"
+                            [ -n "$_bcd_ml_curp" ] && __bettercd_pin_toggle "$_bcd_ml_curp"
+                            __bettercd_menu_rebuild A ;;
+                        t)  # F2 mark the selected dir as a project (.project/)
+                            _bcd_ml_curp="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"
+                            if [ -n "$_bcd_ml_curp" ]; then
+                                if __bettercd_project_mark "$_bcd_ml_curp"; then
+                                    __bettercd_meta_inval "$_bcd_ml_curp"; _bcd_ml_rebuild=1
+                                else
+                                    _bcd_ml_flashrow="$_bcd_ml_sel"
+                                    printf '\033[%dA' "$_bcd_ml_lines" >/dev/tty
+                                    __bettercd_menu_draw; command sleep 0.12
+                                    _bcd_ml_flashrow=-1; _bcd_ml_psel=-1
+                                fi
+                            fi ;;
+                        v) _bcd_ml_table=$(( 1 - _bcd_ml_table )); _bcd_ml_rebuild=1 ;;
+                        r)  # F6 cycle sort: recent → name → modified
+                            case "$_bcd_ml_sort" in
+                                recent) _bcd_ml_sort=name ;;
+                                name)   _bcd_ml_sort=modified ;;
+                                *)      _bcd_ml_sort=recent ;;
+                            esac
+                            __bettercd_menu_rebuild A ;;
+                        l)  # F7 cycle preset: all → projects → git → pinned
+                            case "$_bcd_ml_preset" in
+                                all)  _bcd_ml_preset=proj ;;
+                                proj) _bcd_ml_preset=git ;;
+                                git)  _bcd_ml_preset=pinned ;;
+                                *)    _bcd_ml_preset=all ;;
+                            esac
+                            __bettercd_menu_rebuild B ;;
+                        u)  # F8 cd to the PARENT of the selection
+                            _bcd_ml_curp="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"
+                            if [ -n "$_bcd_ml_curp" ]; then
+                                _bcd_ml_pick_override="${_bcd_ml_curp%/*}"
+                                [ -n "$_bcd_ml_pick_override" ] || _bcd_ml_pick_override="/"
+                                _bcd_ml_act=select
+                            fi ;;
+                        .) _bcd_ml_full=$(( 1 - _bcd_ml_full )); __bettercd_menu_rebuild A ;;
+                        o)  # F8 reveal in Finder (macOS only; silent no-op elsewhere)
+                            if [ "$_bcd_ml_darwin" = 1 ] && command -v open >/dev/null 2>&1; then
+                                _bcd_ml_curp="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"
+                                [ -n "$_bcd_ml_curp" ] && command open -R "$_bcd_ml_curp" >/dev/null 2>&1
+                            fi ;;
+                        '?') __bettercd_menu_help; _bcd_ml_fresh=1 ;;
+                        /)  _bcd_ml_fmode=1; _bcd_ml_query=""; _bcd_ml_rebuild=1 ;;
+                        [1-9])
+                            if [ $(( _bcd_ml_off + _bcd_key )) -le "$_bcd_ml_n" ]; then
+                                _bcd_ml_sel=$(( _bcd_ml_off + _bcd_key - 1 )); _bcd_ml_act=select
+                            fi ;;
+                        '') _bcd_ml_act=cancel ;;   # EOF
+                        [!\ -~]) ;;                  # other control bytes: ignore
+                        *)  # any other printable → enter fuzzy filter implicitly
+                            _bcd_ml_fmode=1; _bcd_ml_query="$_bcd_key"; __bettercd_menu_rebuild B ;;
+                    esac
                 fi ;;
-            '') _bcd_ml_act=cancel ;;   # EOF
-            *) ;;
         esac
-        if [ "$_bcd_ml_move" = up ]; then
+        fi
+        if [ "$_bcd_ml_move" = up ] && [ "$_bcd_ml_n" -gt 0 ]; then
             _bcd_ml_sel=$(( (_bcd_ml_sel - 1 + _bcd_ml_n) % _bcd_ml_n ))
             _bcd_ml_frame=$((_bcd_ml_frame + 1))
-        elif [ "$_bcd_ml_move" = down ]; then
+        elif [ "$_bcd_ml_move" = down ] && [ "$_bcd_ml_n" -gt 0 ]; then
             _bcd_ml_sel=$(( (_bcd_ml_sel + 1) % _bcd_ml_n ))
             _bcd_ml_frame=$((_bcd_ml_frame + 1))
         fi
@@ -774,10 +1416,19 @@ __BCD_EOF__
             [ "$_bcd_ml_sel" -ge $(( _bcd_ml_off + _bcd_ml_vis )) ] && \
                 _bcd_ml_off=$(( _bcd_ml_sel - _bcd_ml_vis + 1 ))
         fi
-        # redraw only when something changed (hover floods motion events)
-        if [ "$_bcd_ml_sel" != "$_bcd_ml_psel" ] || [ "$_bcd_ml_off" != "$_bcd_ml_poff" ]; then
+        # render: fresh (after a modal), full re-render on a height change, or a
+        # cheap in-place redraw when only the selection/offset/content moved
+        if [ -n "$_bcd_ml_fresh" ]; then
+            __bettercd_menu_draw; __bettercd_menu_measure
+            _bcd_ml_plines="$_bcd_ml_lines"; _bcd_ml_psel="$_bcd_ml_sel"; _bcd_ml_poff="$_bcd_ml_off"
+        elif [ "$_bcd_ml_lines" != "$_bcd_ml_plines" ]; then
+            printf '\033[%dA\033[J' "$_bcd_ml_plines" >/dev/tty
+            __bettercd_menu_draw; __bettercd_menu_measure
+            _bcd_ml_plines="$_bcd_ml_lines"; _bcd_ml_psel="$_bcd_ml_sel"; _bcd_ml_poff="$_bcd_ml_off"
+        elif [ "$_bcd_ml_sel" != "$_bcd_ml_psel" ] || [ "$_bcd_ml_off" != "$_bcd_ml_poff" ] \
+             || [ -n "$_bcd_ml_rebuild" ]; then
             printf '\033[%dA' "$_bcd_ml_lines" >/dev/tty
-            __bettercd_menu_draw "$_bcd_ml_disp" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame" "$_bcd_ml_off" "$_bcd_ml_vis"
+            __bettercd_menu_draw
             _bcd_ml_psel="$_bcd_ml_sel"; _bcd_ml_poff="$_bcd_ml_off"
         fi
     done
@@ -786,7 +1437,8 @@ __BCD_EOF__
     printf '\033[%dA\033[J' "$_bcd_ml_lines" >/dev/tty   # erase the menu
     command stty "$_bcd_ml_st" </dev/tty 2>/dev/null      # restore BEFORE acting
     if [ "$_bcd_ml_act" = select ]; then
-        _bcd_ml_pick="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"
+        if [ -n "$_bcd_ml_pick_override" ]; then _bcd_ml_pick="$_bcd_ml_pick_override"
+        else _bcd_ml_pick="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"; fi
         if [ -n "$_bcd_ml_pick" ]; then
             __bettercd_delegate "$_bcd_ml_pick" && __bettercd_clear_miss
             _bcd_ml_rc=$?
