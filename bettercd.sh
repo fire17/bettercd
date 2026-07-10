@@ -14,7 +14,7 @@
 # zoxide and fzf are optional enhancers — bettercd composes with them
 # if present and works fine without them.
 
-BETTERCD_VERSION="0.8.1"
+BETTERCD_VERSION="0.9.0"
 
 # --- paradigm detection (runs once, at source time) -------------------------
 # Decide what "plain cd" means for this user, and never change it silently:
@@ -609,7 +609,7 @@ __bettercd_menu_loop() { # $1 list, $2 count
             j|J) _bcd_ml_move=down ;;
             "$_bcd_ml_cr") _bcd_ml_act=select ;;
             ''|q|Q|"$_bcd_ml_etx") _bcd_ml_act=cancel ;;   # EOF / q / Ctrl-C
-            [1-8])
+            [1-9])
                 if [ "$_bcd_ml_key" -le "$_bcd_ml_n" ]; then
                     _bcd_ml_sel=$((_bcd_ml_key - 1)); _bcd_ml_act=select
                 fi ;;
@@ -641,64 +641,238 @@ __bettercd_menu_loop() { # $1 list, $2 count
     return 1   # cancel
 }
 
+# History replay (L2): reconstruct the ordered dirs a user actually stood in,
+# from their shell history, by SIMULATING cd across the whole file. One awk
+# pass anchors on absolute/~/bare-cd targets and walks relative/.././cd - moves
+# textually (mirroring __bettercd_normalize); z/zi/j/pushd and unresolvable cds
+# ($()/`…`/vars) blank the simulated cwd until the next anchor. Absolute
+# results are emitted in sequence order; a lone relative name that landed while
+# the cwd was unknown is emitted as a "?name" marker for the constraint join.
+# awk is the right tool here: a single fork over thousands of lines. The -d
+# existence checks all happen afterward, in bounded shell loops.
+__bettercd_history_replay() { # $1 = history file → newest-first resolved dirs
+    # The awk pass does ALL the heavy lifting in-memory (one fork over the whole
+    # file): it simulates cd, then emits three labelled sections so the shell
+    # loops over hundreds of tiny lists, never thousands. LC_ALL=C: path work is
+    # byte-oriented and zsh history is metafied — a UTF-8 locale makes BSD awk
+    # choke on invalid multibyte bytes and emit NOTHING. C treats bytes as bytes.
+    #   @B  candidate bases (unique resolved abs paths, ≤40) — for the join
+    #   @N  unique lone-name markers (≤40)                    — for the join
+    #   @L  the resolved dirs, NEWEST-FIRST + deduped (≤300)  — the result stream
+    _bcd_bases="$HOME
+"
+    while IFS= read -r _bcd_bz; do
+        [ -n "$_bcd_bz" ] || continue
+        case "
+$_bcd_bases" in *"
+$_bcd_bz
+"*) continue ;; esac
+        _bcd_bases="$_bcd_bases$_bcd_bz
+"
+    done <<__BCD_EOF__
+${_BETTERCD_SEED_Z-}
+__BCD_EOF__
+
+    _bcd_joined=""; _bcd_out=""; _bcd_oc=0; _bcd_sec=""
+    while IFS= read -r _bcd_ln; do
+        case "$_bcd_ln" in
+            @B) _bcd_sec=B; continue ;;
+            @N) _bcd_sec=N; continue ;;
+            @L) _bcd_sec=L; continue ;;
+        esac
+        case "$_bcd_sec" in
+            B)  # extend the base set with layer-a resolutions (deduped)
+                [ -n "$_bcd_ln" ] || continue
+                case "
+$_bcd_bases" in *"
+$_bcd_ln
+"*) continue ;; esac
+                _bcd_bases="$_bcd_bases$_bcd_ln
+" ;;
+            N)  # constraint join (L2b): keep a name only if EXACTLY ONE known
+                # base has base/name as a real dir (ambiguous → dropped, honest)
+                [ -n "$_bcd_ln" ] || continue
+                _bcd_hit=""; _bcd_hc=0
+                while IFS= read -r _bcd_ba; do
+                    [ -n "$_bcd_ba" ] || continue
+                    if [ -d "$_bcd_ba/$_bcd_ln" ]; then
+                        _bcd_hit="$_bcd_ba/$_bcd_ln"; _bcd_hc=$((_bcd_hc + 1))
+                        [ "$_bcd_hc" -ge 2 ] && break
+                    fi
+                done <<__BCD_INNER__
+$_bcd_bases
+__BCD_INNER__
+                [ "$_bcd_hc" -eq 1 ] && _bcd_joined="$_bcd_joined$_bcd_hit
+" ;;
+            L)  # truth filter (L2c): substitute/drop markers, keep existing
+                # dirs, dedup, stop at the cap (only ~50 ever reach the pool)
+                [ "$_bcd_oc" -lt 60 ] || break
+                [ -n "$_bcd_ln" ] || continue
+                case "$_bcd_ln" in
+                    '?'?*)
+                        _bcd_nm="${_bcd_ln#?}"; _bcd_ln=""
+                        while IFS= read -r _bcd_jj; do
+                            case "$_bcd_jj" in */"$_bcd_nm") _bcd_ln="$_bcd_jj"; break ;; esac
+                        done <<__BCD_INNER__
+$_bcd_joined
+__BCD_INNER__
+                        [ -n "$_bcd_ln" ] || continue ;;
+                esac
+                [ -d "$_bcd_ln" ] || continue
+                case "
+$_bcd_out" in *"
+$_bcd_ln
+"*) continue ;; esac
+                _bcd_out="$_bcd_out$_bcd_ln
+"; _bcd_oc=$((_bcd_oc + 1)) ;;
+        esac
+    done <<__BCD_EOF__
+$(LC_ALL=C command awk -v home="$HOME" '
+  function norm(base, tgt,   p,n,i,seg,out) {
+    if (substr(tgt,1,1) == "/") p = tgt; else p = base "/" tgt
+    n = split(p, seg, "/"); out = ""
+    for (i = 1; i <= n; i++) {
+      if (seg[i] == "" || seg[i] == ".") continue
+      else if (seg[i] == "..") sub(/\/[^\/]*$/, "", out)
+      else out = out "/" seg[i]
+    }
+    return (out == "") ? "/" : out
+  }
+  function rec(v,   nm) {                          # record an emitted value
+    em[++ec] = v
+    if (substr(v,1,1) == "/") {                    # a resolved path → base
+      if (!(v in bseen)) { bseen[v]=1; if (bc<40) bkeep[++bc]=v }
+    } else if (substr(v,1,1) == "?") {             # a lone-name marker
+      nm = substr(v,2); if (!(nm in nseen)) { nseen[nm]=1; if (nc<40) nkeep[++nc]=nm }
+    }
+  }
+  BEGIN { q = sprintf("%c", 39); known = 0 }
+  {
+    line = $0
+    sub(/^:[[:blank:]][0-9]+:[0-9]+;/, "", line)     # zsh extended prefix
+    sub(/^[[:blank:]]+/, "", line); sub(/[[:blank:]]+$/, "", line)
+    cmd = line; sub(/[[:blank:]].*$/, "", cmd)
+    if (cmd=="z"||cmd=="zi"||cmd=="j"||cmd=="pushd"||cmd=="popd") { known=0; next }
+    if (cmd != "cd") next
+    if (line == "cd") { old=cwd; cwd=home; known=1; rec(cwd); next }   # bare cd → HOME
+    rest = line; sub(/^cd[[:blank:]]+/, "", rest)
+    while (rest ~ /^-[A-Za-z]/) sub(/^[^[:blank:]]+[[:blank:]]+/, "", rest)  # flags
+    if (substr(rest,1,1)=="\"" && substr(rest,length(rest),1)=="\"" && length(rest)>=2)
+      rest = substr(rest, 2, length(rest)-2)
+    else if (substr(rest,1,1)==q && substr(rest,length(rest),1)==q && length(rest)>=2)
+      rest = substr(rest, 2, length(rest)-2)
+    if (rest ~ /[$`]/) { known=0; next }             # var / cmdsub → cannot follow
+    if (rest == "-") { if (known && oldk) { t=cwd; cwd=old; old=t; rec(cwd) } else known=0; next }
+    if (rest == "--" || rest ~ /^[-+][0-9]/) { known=0; next }   # menu / dir-stack
+    if (substr(rest,1,1) == "~") rest = home substr(rest, 2)     # ~ or ~/x
+    if (substr(rest,1,1) == "/") { old=cwd; oldk=known; cwd=norm("", rest); known=1; rec(cwd); next }
+    if (known) { old=cwd; oldk=known; cwd=norm(cwd, rest); known=1; rec(cwd); next }
+    else if (rest !~ /\//) rec("?" rest)             # lone name → join candidate
+  }
+  END {
+    print "@B"; for (i=1;i<=bc;i++) print bkeep[i]
+    print "@N"; for (i=1;i<=nc;i++) print nkeep[i]
+    print "@L"                                       # newest-first, deduped, ≤300
+    for (i=ec;i>=1;i--) { v=em[i]; if (v=="" || (v in lseen)) continue; lseen[v]=1; if (lc<300) { lc++; print v } }
+  }
+' "$1" 2>/dev/null)
+__BCD_EOF__
+    printf '%s' "$_bcd_out"
+}
+
 # One-time backlog seed for the dropdown: places you went BEFORE this session
-# started using bettercd. Best source is zoxide's db (real visited dirs,
-# absolute, frecency-ordered); fallback parses zsh/bash history for `cd`
-# commands with absolute or ~ targets ONLY — relative entries (`cd test`)
-# are honestly unresolvable: the cwd they were typed in is unknown. Runs
-# lazily at first menu build, never at source time (startup stays instant).
+# started using bettercd. MERGES two sources (L1): zoxide's db (real visited
+# dirs, frecency-ordered — highest recency confidence) FIRST, then history
+# replay's resolved dirs that zoxide did not already know. Deduped, pool capped
+# ~50, appended AFTER live-session recents so the backlog never outranks what
+# the user just did. Runs lazily at first menu build, never at source time.
+# _BETTERCD_SEED_Z / _BETTERCD_SEED_H record each entry's source for `places`.
 __bettercd_seed_recent() {
     [ -n "${_BETTERCD_SEEDED-}" ] && return 0
     _BETTERCD_SEEDED=1
-    _bcd_sd=""
+    _BETTERCD_SEED_Z=""; _BETTERCD_SEED_H=""
+
     if command -v zoxide >/dev/null 2>&1; then
-        _bcd_sd="$(command zoxide query -l 2>/dev/null | head -20)"
+        _BETTERCD_SEED_Z="$(command zoxide query -l 2>/dev/null | head -25)"
     fi
-    if [ -z "$_bcd_sd" ]; then
-        for _bcd_shf in "${HISTFILE-}" "$HOME/.zsh_history" "$HOME/.bash_history"; do
-            [ -f "$_bcd_shf" ] || continue   # empty var fails -f too
-            # strip zsh extended-history prefixes; keep cd /abs and cd ~/…;
-            # newest first (awk reverse — tac/tail -r aren't both portable)
-            _bcd_sd="$(sed -e 's/^: [0-9]*:[0-9]*;//' "$_bcd_shf" 2>/dev/null \
-                | grep -E '^[[:space:]]*cd[[:space:]]+["'\'']?(/|~)' \
-                | sed -e 's/^[[:space:]]*cd[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' \
-                      -e "s|^~|$HOME|" \
-                | tail -50 \
-                | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--)print a[i]}')"
-            [ -n "$_bcd_sd" ] && break
-        done
-    fi
-    [ -n "$_bcd_sd" ] || return 0
-    # append AFTER live-session recents: the backlog never outranks what the
-    # user actually did just now; menu-time -d checks drop dead entries
+
+    _bcd_hres=""
+    for _bcd_shf in "${HISTFILE-}" "$HOME/.zsh_history" "$HOME/.bash_history"; do
+        [ -f "$_bcd_shf" ] || continue   # empty var fails -f too
+        _bcd_hres="$(__bettercd_history_replay "$_bcd_shf")"
+        break
+    done
+
+    # merge: zoxide first, then history-only, dedup, cap ~50. Pool entries are
+    # newline-TERMINATED so the `*"\n<entry>\n"*` membership test delimits every
+    # one (including the last) — the same convention the menu builder uses.
+    _bcd_pool=""; _bcd_pc=0
+    while IFS= read -r _bcd_zl; do
+        [ -n "$_bcd_zl" ] || continue
+        _bcd_pool="$_bcd_pool$_bcd_zl
+"; _bcd_pc=$((_bcd_pc + 1))
+    done <<__BCD_EOF__
+$_BETTERCD_SEED_Z
+__BCD_EOF__
+    while IFS= read -r _bcd_hl; do
+        [ "$_bcd_pc" -lt 50 ] || break
+        [ -n "$_bcd_hl" ] || continue
+        case "
+$_bcd_pool" in *"
+$_bcd_hl
+"*) continue ;; esac
+        _bcd_pool="$_bcd_pool$_bcd_hl
+"
+        _BETTERCD_SEED_H="$_BETTERCD_SEED_H$_bcd_hl
+"
+        _bcd_pc=$((_bcd_pc + 1))
+    done <<__BCD_EOF__
+$_bcd_hres
+__BCD_EOF__
+
+    [ -n "$_bcd_pool" ] || return 0
     _BETTERCD_RECENT="${_BETTERCD_RECENT-}
-$_bcd_sd"
+$_bcd_pool"
     return 0
 }
 
-# Entry point: build the list (OLDPWD first + deduped recent, cap 8), or fall
+# Build the ordered candidate list — OLDPWD first, then deduped recent+seed
+# places that still exist — capped at $1. One source of truth for both the
+# dropdown and `bettercd places`. Prints one absolute path per line.
+__bettercd_pool() { # $1 = cap
+    _bcd_po_cap="$1"; _bcd_po_list=""; _bcd_po_n=0
+    if [ -n "${OLDPWD-}" ] && [ -d "$OLDPWD" ]; then
+        _bcd_po_list="$OLDPWD
+"; _bcd_po_n=1; printf '%s\n' "$OLDPWD"
+    fi
+    while IFS= read -r _bcd_po_r; do
+        [ "$_bcd_po_n" -lt "$_bcd_po_cap" ] || break
+        [ -n "$_bcd_po_r" ] || continue
+        [ "$_bcd_po_r" = "$PWD" ] && continue
+        [ -d "$_bcd_po_r" ] || continue
+        case "
+$_bcd_po_list" in *"
+$_bcd_po_r
+"*) continue ;; esac
+        _bcd_po_list="$_bcd_po_list$_bcd_po_r
+"; _bcd_po_n=$((_bcd_po_n + 1))
+        printf '%s\n' "$_bcd_po_r"
+    done <<__BCD_EOF__
+${_BETTERCD_RECENT-}
+__BCD_EOF__
+}
+
+# Entry point: build the list (OLDPWD first + deduped recent, cap 10), or fall
 # back to a silent classic toggle when there's nothing worth a menu.
 __bettercd_magic_menu() { # $1 = "forced" when the user explicitly asked (cd --)
     __bettercd_tty_ok || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
     __bettercd_seed_recent
-    _bcd_mm_list=""; _bcd_mm_n=0
-    if [ -n "${OLDPWD-}" ] && [ -d "$OLDPWD" ]; then
-        _bcd_mm_list="$OLDPWD
-"; _bcd_mm_n=1
-    fi
-    while IFS= read -r _bcd_mm_r; do
-        [ "$_bcd_mm_n" -lt 8 ] || break
-        [ -n "$_bcd_mm_r" ] || continue
-        [ "$_bcd_mm_r" = "$PWD" ] && continue
-        [ -d "$_bcd_mm_r" ] || continue
-        case "
-$_bcd_mm_list" in *"
-$_bcd_mm_r
-"*) continue ;; esac
-        _bcd_mm_list="$_bcd_mm_list$_bcd_mm_r
-"; _bcd_mm_n=$((_bcd_mm_n + 1))
+    _bcd_mm_list="$(__bettercd_pool 10)"
+    _bcd_mm_n=0
+    while IFS= read -r _bcd_mm_c; do
+        [ -n "$_bcd_mm_c" ] && _bcd_mm_n=$((_bcd_mm_n + 1))
     done <<__BCD_EOF__
-${_BETTERCD_RECENT-}
+$_bcd_mm_list
 __BCD_EOF__
     if [ "${1-}" = forced ]; then
         # explicit ask (cd --): always show what we have; nothing at all →
@@ -712,6 +886,52 @@ __BCD_EOF__
         return $?
     fi
     __bettercd_menu_loop "$_bcd_mm_list" "$_bcd_mm_n"
+}
+
+# `bettercd places` (L3): show the whole recent-places pool — numbered,
+# home-relative, colored on a tty (NO_COLOR-aware) — with a cheap source tag
+# (live / zoxide / history). `bettercd places -n <k>` limits the count.
+__bettercd_places() {
+    _bcd_pl_cap=1000
+    if [ "${1-}" = "-n" ]; then
+        case "${2-}" in
+            ''|*[!0-9]*) printf 'bettercd: places -n needs a whole number\n' >&2; return 1 ;;
+            *) _bcd_pl_cap="$2" ;;
+        esac
+    fi
+    __bettercd_seed_recent
+    if [ -t 1 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+        _bcd_pl_N='\033[38;5;213m' _bcd_pl_C='\033[1;36m' _bcd_pl_D='\033[2m' _bcd_pl_R='\033[0m'
+    else
+        _bcd_pl_N='' _bcd_pl_C='' _bcd_pl_D='' _bcd_pl_R=''
+    fi
+    _bcd_pl_i=0
+    while IFS= read -r _bcd_pl_p; do
+        [ -n "$_bcd_pl_p" ] || continue
+        _bcd_pl_i=$((_bcd_pl_i + 1))
+        _bcd_pl_tag=live
+        case "
+${_BETTERCD_SEED_Z-}
+" in *"
+$_bcd_pl_p
+"*) _bcd_pl_tag=zoxide ;; esac
+        if [ "$_bcd_pl_tag" = live ]; then
+            case "
+${_BETTERCD_SEED_H-}
+" in *"
+$_bcd_pl_p
+"*) _bcd_pl_tag=history ;; esac
+        fi
+        printf "  ${_bcd_pl_N}%2d${_bcd_pl_R} ${_bcd_pl_C}%s${_bcd_pl_R}  ${_bcd_pl_D}%s${_bcd_pl_R}\n" \
+            "$_bcd_pl_i" "$(__bettercd_home_rel "$_bcd_pl_p")" "$_bcd_pl_tag"
+    done <<__BCD_EOF__
+$(__bettercd_pool "$_bcd_pl_cap")
+__BCD_EOF__
+    if [ "$_bcd_pl_i" -eq 0 ]; then
+        printf "  ${_bcd_pl_D}no recent places yet — move around a little first${_bcd_pl_R}\n" >&2
+        return 1
+    fi
+    return 0
 }
 
 # --- the cd wrapper ----------------------------------------------------------
@@ -922,6 +1142,7 @@ bettercd() {
         doctor)  shift; __bettercd_doctor "$@" ;;
         backup)  __bettercd_backup ;;
         magic)   shift; __bettercd_magic_cmd "$@" ;;
+        places)  shift; __bettercd_places "$@" ;;
         status)  __bettercd_status ;;
         version|--version|-v) printf 'bettercd %s\n' "$BETTERCD_VERSION" ;;
         help|--help|-h|'')    __bettercd_help ;;
@@ -958,6 +1179,7 @@ __bettercd_help() {
         "bettercd backup"  "snapshot your cd paradigm + RESTORE.md" \
         "bettercd status"  "mode, pending undo, version" \
         "bettercd magic"   "on|off|status|window <min> — the cd - dropdown" \
+        "bettercd places"  "list the recent-places pool (-n <k> limits)" \
         "cd - (×2)"        "sparkling dropdown of recent places (cd -- forces it)" \
         "cdi <query>"      "interactive fuzzy cd (zoxide + fzf)"
     printf "\n  ${_bh_S}ENV${_bh_R}\n"

@@ -428,6 +428,89 @@ elif command -v zoxide >/dev/null 2>&1; then
     printf 'skip: zoxide present — history-fallback seed path not exercised here\n'
 fi
 
+# 27. history REPLAY + zoxide/history MERGE + bettercd places -----------------
+# Stubs a fake `zoxide` on PATH so the merge path runs deterministically
+# regardless of whether the host has a real zoxide (never touches a real db).
+if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
+    cd "$TMP"
+    mkdir -p "$TMP/rp/base/sub" "$TMP/rp/base/sub2" "$TMP/rp/uniq/lone" \
+             "$TMP/rp/a1/dupname" "$TMP/rp/a2/dupname" "$TMP/rp/zonly"
+
+    # fake zoxide: `query -l` prints uniq (a join base), base (dup vs history),
+    # and zonly (zoxide-only). Paths are baked in at write time.
+    mkdir -p "$TMP/fakebin"
+    cat > "$TMP/fakebin/zoxide" <<STUB
+#!/bin/sh
+[ "\$1" = query ] && printf '%s\n' "$TMP/rp/uniq" "$TMP/rp/base" "$TMP/rp/zonly" "$TMP/rp/a1" "$TMP/rp/a2"
+exit 0
+STUB
+    chmod +x "$TMP/fakebin/zoxide"
+    rp_oldpath="$PATH"; PATH="$TMP/fakebin:$PATH"; export PATH
+
+    HISTFILE="$TMP/.rphist"
+    {
+        printf ': 1700000001:0;cd %s/rp/base\n' "$TMP"   # absolute anchor
+        printf 'cd sub\n'                                # relative chain
+        printf 'cd ..\n'
+        printf 'cd sub2\n'
+        printf 'ls -la\n'
+        printf 'cd ~\n'                                  # ~ anchor → HOME
+        printf 'z jump-somewhere\n'                      # unresolvable jump → cwd unknown
+        printf 'cd lone\n'                               # lone name after jump → join via uniq
+        printf 'cd %s/rp/a1\n' "$TMP"                    # re-anchor
+        printf 'z jump-again\n'
+        printf 'cd dupname\n'                            # ambiguous (a1 & a2) → dropped
+    } > "$HISTFILE"
+
+    _BETTERCD_SEEDED=""; _BETTERCD_RECENT=""; _BETTERCD_SEED_Z=""; _BETTERCD_SEED_H=""
+    __bettercd_seed_recent
+
+    # 27a. absolute anchor + relative chain (sub / .. / sub2) all resolved
+    case "$_BETTERCD_RECENT" in *"$TMP/rp/base/sub2"*) ok ;; *) bad "replay: relative chain resolves (sub2)" ;; esac
+    case "$_BETTERCD_RECENT" in *"$TMP/rp/base/sub"*)  ok ;; *) bad "replay: relative chain resolves (sub)"  ;; esac
+
+    # 27b. ~ anchor → HOME
+    case "$_BETTERCD_RECENT" in *"$HOME"*) ok ;; *) bad "replay: ~ anchor resolves to HOME" ;; esac
+
+    # 27c. constraint join: lone `cd lone` resolved via the (zoxide-known) uniq base
+    case "$_BETTERCD_RECENT" in *"$TMP/rp/uniq/lone"*) ok ;; *) bad "replay: constraint-join resolves lone name" ;; esac
+
+    # 27d. ambiguous `cd dupname` (a1 & a2 both match) → dropped, honestly
+    case "$_BETTERCD_RECENT" in *dupname*) bad "replay: ambiguous name dropped" ;; *) ok ;; esac
+
+    # 27e. merge dedup: base is in BOTH zoxide and history → appears exactly once
+    dupn="$(printf '%s\n' "$_BETTERCD_RECENT" | grep -cx "$TMP/rp/base")"
+    [ "$dupn" -eq 1 ]; check "merge: zoxide+history dedup (base once)" $?
+
+    # 27f. zoxide-only dir is present in the pool
+    case "$_BETTERCD_RECENT" in *"$TMP/rp/zonly"*) ok ;; *) bad "merge: zoxide-only dir present" ;; esac
+
+    # 27g. bettercd places lists them, numbered
+    places="$(bettercd places 2>/dev/null)"
+    case "$places" in *"$TMP/rp/zonly"*) ok ;; *) bad "places: lists pool entries" ;; esac
+    printf '%s\n' "$places" | grep -q '^[[:space:]]*1[[:space:]]'; check "places: rows are numbered" $?
+
+    # 27h. places source tags: zoxide-only → zoxide; history-only chain → history
+    printf '%s\n' "$places" | grep "$TMP/rp/zonly" | grep -q 'zoxide'
+    check "places: zoxide-only tagged zoxide" $?
+    printf '%s\n' "$places" | grep "$TMP/rp/base/sub2" | grep -q 'history'
+    check "places: history-only tagged history" $?
+
+    # 27i. places -n <k> limits the row count
+    plim="$(bettercd places -n 2 2>/dev/null | grep -c '/')"
+    [ "$plim" -le 2 ]; check "places: -n limits row count" $?
+    bettercd places -n abc >/dev/null 2>&1; [ $? -ne 0 ]; check "places: -n rejects non-numeric" $?
+
+    # 27j. one-time only: a second seed does not grow the pool
+    seed_len=${#_BETTERCD_RECENT}
+    __bettercd_seed_recent
+    [ "${#_BETTERCD_RECENT}" -eq "$seed_len" ]; check "merge: seed is one-time only" $?
+
+    PATH="$rp_oldpath"; export PATH
+    unset HISTFILE; _BETTERCD_SEEDED=""; _BETTERCD_RECENT=""; _BETTERCD_SEED_Z=""; _BETTERCD_SEED_H=""
+    cd "$TMP"
+fi
+
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
 rm -rf "$TMP"

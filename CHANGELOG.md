@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.9.0 — 2026-07-10
+
+- The dropdown backlog is now a real **history replay**, not just absolute-cd
+  scraping. A single `awk` pass SIMULATES `cd` across the whole history file —
+  anchoring on absolute / `~` / bare-`cd` targets and walking relative,
+  `.`/`..`, and `cd -` moves textually — so relative history like
+  `cd /base` → `cd sub` → `cd ..` → `cd sub2` now resolves to real dirs.
+  `z`/`zi`/`j`/`pushd` and unresolvable `cd`s (`$(…)`, backticks, vars) blank
+  the simulated cwd until the next anchor. A lone `cd <name>` that landed while
+  the cwd was unknown is recovered by a **constraint join**: kept only if
+  EXACTLY ONE known base (`$HOME`, the zoxide db, or a resolved path) has
+  `base/name` as a real dir (ambiguous → dropped, honestly). Every candidate
+  passes a `[ -d ]` truth filter before entering the pool.
+- Backlog sources are now **merged**, not either/or: zoxide's db FIRST (highest
+  recency confidence), then history-replay dirs zoxide didn't already know —
+  deduped, pool capped ~50. This surfaces history-only places zoxide never
+  recorded (measured: 23 such dirs on a real 6.3k-line `~/.zsh_history`).
+- New `bettercd places` — list the whole recent-places pool, numbered and
+  home-relative, colored on a tty (NO_COLOR-aware), with a source tag
+  (live / zoxide / history). `bettercd places -n <k>` limits the count.
+- The `cd -` / `cd --` dropdown now shows up to **10** rows (was 8); number
+  keys 1–9 jump directly.
+- Seeding stays one-time and lazy (first menu open); measured ~130 ms on a real
+  6.3k-line history and well under that on a synthetic 10k-line one. `awk` runs
+  under `LC_ALL=C` — path work is byte-oriented and zsh history is metafied, so
+  a UTF-8 locale made BSD awk silently emit nothing on real history files.
+
+
 ## v0.8.1 — 2026-07-10
 
 - Lint: same SC2015 pattern the v0.3.1 patch fixed, reintroduced in the

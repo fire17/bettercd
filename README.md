@@ -71,7 +71,8 @@ flowchart LR
 - **`cd some/file.txt` → jumps to the file's parent directory** instead of erroring.
 - **`bettercd doctor`** — checks zoxide is installed and working, whether it owns `cd`, whether fuzzy interactive search (fzf) is available, and that bettercd is loaded in the right order. `--fix` backs up your setup first, then offers to install what's missing.
 - **`bettercd backup`** — snapshots your current cd paradigm (your `cd` function, aliases, rc files, zoxide database) plus a `RESTORE.md` with exact steps to return to it.
-- **`cd --` — a ✻ sparkling dropdown of recent places.** Arrow keys / digits, Enter goes (last place auto-selected), Esc cancels. First open seeds a backlog of where you've been *before* bettercd (zoxide's db when present; else absolute `cd` targets from shell history). `cd -` stays exactly classic by default — opt in to auto-magic (`bettercd magic on`: second `cd -` within a minute opens the dropdown for a refreshing 5-min window). `builtin cd -` is always the pure classic toggle.
+- **`cd --` — a ✻ sparkling dropdown of recent places.** Up to 10 rows; arrow keys / `j` `k` / digits `1`–`9`, Enter goes (last place auto-selected), Esc cancels. First open seeds a backlog of where you've been *before* bettercd, **merging** zoxide's db (highest recency confidence) with a real **history replay** — a single `awk` pass that *simulates* `cd` across your shell history so even relative moves (`cd /base` → `cd sub` → `cd ..`) resolve to real dirs, with a constraint join for lone `cd <name>`s and a `[ -d ]` truth filter on everything. `cd -` stays exactly classic by default — opt in to auto-magic (`bettercd magic on`: second `cd -` within a minute opens the dropdown for a refreshing 5-min window). `builtin cd -` is always the pure classic toggle.
+- **`bettercd places`** — see the whole recent-places pool, numbered and home-relative, with a source tag (live / zoxide / history). `bettercd places -n <k>` limits the count.
 - **Vanished dirs get a real answer.** `cd -` back to a dir that was renamed/moved? bettercd remembers inodes, finds it, tells you — `✻ test is now test2 — taking you there` — and goes. Actually deleted: a clean `does not exist there anymore (deleted or moved away)` instead of a raw shell error.
 - **`cd..` just works** — the classic no-space typo: `cd..` → `cd ..`, `cd...` → `cd ../..`, up to `cd.....`. (`BETTERCD_CD_TYPOS=0` to disable.)
 - Flags (`cd -P`), `cd -`, `CDPATH`, dir-stack (`cd +2`), custom `cd` functions: all preserved and passed through.
@@ -148,6 +149,7 @@ bettercd doctor       health-check zoxide / fzf / load order   (--fix to install
 bettercd backup       snapshot current cd setup + RESTORE.md
 bettercd status       mode, pending undo, version
 bettercd magic        on | off | status | window <minutes> — the cd - dropdown
+bettercd places       list the recent-places pool (-n <k> limits)
 cdi <query>           interactive fuzzy cd (zoxide + fzf)
 
 BETTERCD_AUTO_CREATE=0    disable auto-create
