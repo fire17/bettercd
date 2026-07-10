@@ -108,6 +108,48 @@ __bettercd_interactive() {
 
 __bettercd_clear_miss() { _BETTERCD_LAST_MISS=""; }
 
+# control chars, computed once at source time (menus build frames fork-free)
+_BETTERCD_ESC="$(printf '\033')"
+_BETTERCD_CR="$(printf '\r')"
+
+# builtin single-byte tty readers — no dd fork, no stty juggling per key.
+# $1 = timeout in seconds ('' = block). Sets _bcd_key ('' on timeout/EOF).
+if [ -n "${ZSH_VERSION-}" ]; then
+    eval '__bettercd_readkey() {
+        _bcd_key=""
+        if [ -n "${1-}" ]; then
+            read -t "$1" -k 1 -u 0 _bcd_key </dev/tty 2>/dev/null || _bcd_key=""
+        else
+            read -k 1 -u 0 _bcd_key </dev/tty 2>/dev/null || _bcd_key=""
+        fi
+    }'
+elif [ -n "${BASH_VERSION-}" ]; then
+    # bash < 4 rejects fractional read -t: fall back to dd + stty timeouts
+    # there (menu still works, just costs a fork on escape tails)
+    # shellcheck disable=SC3028  # BASH_VERSINFO: guarded bash-only branch
+    if [ "${BASH_VERSINFO:-3}" -ge 4 ] 2>/dev/null; then
+        eval '__bettercd_readkey() {
+            _bcd_key=""
+            if [ -n "${1-}" ]; then
+                IFS= read -rs -t "$1" -n 1 _bcd_key </dev/tty 2>/dev/null || _bcd_key=""
+            else
+                IFS= read -rs -n 1 _bcd_key </dev/tty 2>/dev/null || _bcd_key=""
+            fi
+        }'
+    else
+        __bettercd_readkey() {
+            _bcd_key=""
+            if [ -n "${1-}" ]; then
+                command stty min 0 time 2 </dev/tty 2>/dev/null
+                _bcd_key="$(dd bs=1 count=1 2>/dev/null </dev/tty)"
+                command stty raw -echo min 1 time 0 </dev/tty 2>/dev/null
+            else
+                _bcd_key="$(dd bs=1 count=1 2>/dev/null </dev/tty)"
+            fi
+        }
+    fi
+fi
+
 # nth wrapping token of a space-separated list (0-based index). Tokenizes by
 # hand rather than via `for x in $list` — zsh does not word-split unquoted
 # expansions, so that idiom would see the whole list as a single token.
@@ -561,18 +603,26 @@ __BCD_EOF__
 
 # Draw the whole menu (header + rows) to /dev/tty. Raw mode ⇒ lines end \r\n.
 # The selected row's ✻ cycles the sparkle palette by $4 for a little delight.
-__bettercd_menu_draw() { # $1 list, $2 count, $3 selected, $4 frame, $5 offset, $6 visible
-    _bcd_dc="$(__bettercd_nth '213 219 177 225' "$4")"
-    printf '\033[38;5;213m✻\033[0m \033[2mrecent places  ↑↓·wheel · ⏎·click cd · esc\033[0m\033[K\r\n' >/dev/tty
+__bettercd_menu_draw() { # $1 disp-list, $2 count, $3 selected, $4 frame, $5 offset, $6 visible
+    # ZERO forks: iterate precomputed display rows (string ops only), build the
+    # whole frame — CRLF line endings for raw mode included — in one variable,
+    # write it with ONE printf. Selected and unselected rows share the same
+    # 2-char gutter so the text never jumps.
+    case $(( $4 % 4 )) in
+        0) _bcd_dc=213 ;; 1) _bcd_dc=219 ;; 2) _bcd_dc=177 ;; 3) _bcd_dc=225 ;;
+    esac
+    _bcd_dE="$_BETTERCD_ESC"
+    _bcd_dL="$_BETTERCD_CR
+"
+    _bcd_df="${_bcd_dE}[38;5;213m✻${_bcd_dE}[0m ${_bcd_dE}[2mrecent places  ↑↓·wheel · ⏎·click cd · esc${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     _bcd_di=0; _bcd_dend=$(( $5 + $6 ))
     while IFS= read -r _bcd_dp; do
         [ -n "$_bcd_dp" ] || continue
         if [ "$_bcd_di" -ge "$5" ] && [ "$_bcd_di" -lt "$_bcd_dend" ]; then
-            _bcd_dd="$(__bettercd_home_rel "$_bcd_dp")"
             if [ "$_bcd_di" = "$3" ]; then
-                printf '\033[38;5;%sm✻\033[0m \033[1;36m%s\033[0m\033[K\r\n' "$_bcd_dc" "$_bcd_dd" >/dev/tty
+                _bcd_df="$_bcd_df${_bcd_dE}[38;5;${_bcd_dc}m✻${_bcd_dE}[0m ${_bcd_dE}[1;36m$_bcd_dp${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
             else
-                printf '  \033[2m· %s\033[0m\033[K\r\n' "$_bcd_dd" >/dev/tty
+                _bcd_df="$_bcd_df${_bcd_dE}[2m· $_bcd_dp${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
             fi
         fi
         _bcd_di=$((_bcd_di + 1))
@@ -580,93 +630,99 @@ __bettercd_menu_draw() { # $1 list, $2 count, $3 selected, $4 frame, $5 offset, 
     done <<__BCD_EOF__
 $1
 __BCD_EOF__
-    # footer: position + scroll hints (constant line count for redraw math)
     _bcd_dup=" "; _bcd_ddn=" "
     [ "$5" -gt 0 ] && _bcd_dup="↑"
     [ "$_bcd_dend" -lt "$2" ] && _bcd_ddn="↓"
-    printf '  \033[2m%s %s/%s %s\033[0m\033[K\r\n' "$_bcd_dup" "$(( $3 + 1 ))" "$2" "$_bcd_ddn" >/dev/tty
+    _bcd_df="$_bcd_df  ${_bcd_dE}[2m$_bcd_dup $(( $3 + 1 ))/$2 $_bcd_ddn${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
+    printf '%s' "$_bcd_df" >/dev/tty
 }
+
+
 
 # The interactive loop: raw single-byte input, redraw in place, clean erase.
 # stty is restored before EVERY return path (trap-free by design).
-__bettercd_menu_loop() { # $1 list, $2 count
+__bettercd_menu_loop() { # $1 list (real paths), $2 count
     _bcd_ml_list="$1"; _bcd_ml_n="$2"; _bcd_ml_sel=0; _bcd_ml_frame=0; _bcd_ml_off=0
     _bcd_ml_psel=0; _bcd_ml_poff=0
-    # viewport: as tall as the terminal comfortably allows (the "big list"),
-    # scrolls under the selection; footer shows position + more-indicators
     _bcd_ml_vis=12
     _bcd_ml_lmax="${LINES:-24}"; _bcd_ml_lmax=$((_bcd_ml_lmax - 6))
     [ "$_bcd_ml_lmax" -ge 5 ] || _bcd_ml_lmax=5
     [ "$_bcd_ml_vis" -le "$_bcd_ml_lmax" ] || _bcd_ml_vis="$_bcd_ml_lmax"
     [ "$_bcd_ml_vis" -le "$_bcd_ml_n" ] || _bcd_ml_vis="$_bcd_ml_n"
     _bcd_ml_lines=$((_bcd_ml_vis + 2))   # header + window + footer
+
+    # precompute display rows ONCE (home-relative) — redraws are then pure
+    # string work: zero forks per frame, zero forks per keypress
+    _bcd_ml_disp=""
+    while IFS= read -r _bcd_ml_r; do
+        [ -n "$_bcd_ml_r" ] || continue
+        case "$_bcd_ml_r" in
+            "$HOME")   _bcd_ml_disp="$_bcd_ml_disp~
+" ;;
+            "$HOME"/*) _bcd_ml_disp="$_bcd_ml_disp~${_bcd_ml_r#"$HOME"}
+" ;;
+            *)         _bcd_ml_disp="$_bcd_ml_disp$_bcd_ml_r
+" ;;
+        esac
+    done <<__BCD_EOF__
+$_bcd_ml_list
+__BCD_EOF__
+
     _bcd_ml_st="$(command stty -g </dev/tty 2>/dev/null)"
     [ -n "$_bcd_ml_st" ] || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
     command stty raw -echo </dev/tty 2>/dev/null
-    # SGR mouse reporting: wheel scrolls, left-click cds, right-click cancels.
-    # Armed ONLY while the menu is open; disarmed on EVERY exit path below —
-    # a leaked mouse mode garbles the terminal worse than a raw stty.
     printf '\033[?1003h\033[?1006h' >/dev/tty
-    __bettercd_menu_draw "$_bcd_ml_list" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame" "$_bcd_ml_off" "$_bcd_ml_vis"
-    # menu top row (for click→row mapping): one CPR — cursor now sits just
-    # below the footer, so top = row - lines. Raw mode is already on.
+    __bettercd_menu_draw "$_bcd_ml_disp" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame" "$_bcd_ml_off" "$_bcd_ml_vis"
+    # menu top row for click mapping: one CPR, read with the builtin reader
     _bcd_ml_top=""
     printf '\033[6n' >/dev/tty
-    command stty min 0 time 2 </dev/tty 2>/dev/null
-    _bcd_ml_rep=""
-    _bcd_ml_i=0
+    _bcd_ml_rep=""; _bcd_ml_i=0
     while [ "$_bcd_ml_i" -lt 12 ]; do
-        _bcd_ml_ch="$(dd bs=1 count=1 2>/dev/null </dev/tty)"
-        [ -n "$_bcd_ml_ch" ] || break
-        [ "$_bcd_ml_ch" = R ] && break
-        _bcd_ml_rep="$_bcd_ml_rep$_bcd_ml_ch"
+        __bettercd_readkey 0.2
+        [ -n "$_bcd_key" ] || break
+        [ "$_bcd_key" = R ] && break
+        _bcd_ml_rep="$_bcd_ml_rep$_bcd_key"
         _bcd_ml_i=$((_bcd_ml_i + 1))
     done
-    command stty raw -echo </dev/tty 2>/dev/null
     _bcd_ml_rep="${_bcd_ml_rep##*\[}"; _bcd_ml_rep="${_bcd_ml_rep%%;*}"
     case "$_bcd_ml_rep" in
         ''|*[!0-9]*) ;;
         *) _bcd_ml_top=$(( _bcd_ml_rep - _bcd_ml_lines )) ;;
     esac
 
-    _bcd_ml_esc="$(printf '\033')"; _bcd_ml_cr="$(printf '\r')"
-    _bcd_ml_etx="$(printf '\003')"; _bcd_ml_act=""
+    _bcd_ml_esc="$_BETTERCD_ESC"; _bcd_ml_cr="$_BETTERCD_CR"
+    _bcd_ml_etx="$(printf '\003')"; _bcd_ml_nl="$(printf '\n')"; _bcd_ml_act=""
     while :; do
-        _bcd_ml_key="$(dd bs=1 count=1 2>/dev/null </dev/tty)"
+        __bettercd_readkey ""
         _bcd_ml_move=""
-        case "$_bcd_ml_key" in
+        case "$_bcd_key" in
             "$_bcd_ml_esc")
-                command stty min 0 time 2 </dev/tty 2>/dev/null
-                _bcd_ml_seq="$(dd bs=1 count=2 2>/dev/null </dev/tty)"
-                command stty raw -echo </dev/tty 2>/dev/null
-                case "$_bcd_ml_seq" in
+                __bettercd_readkey 0.05; _bcd_ml_s1="$_bcd_key"
+                __bettercd_readkey 0.05; _bcd_ml_s2="$_bcd_key"
+                case "$_bcd_ml_s1$_bcd_ml_s2" in
                     '[A'|'OA') _bcd_ml_move=up ;;
                     '[B'|'OB') _bcd_ml_move=down ;;
                     '[<')
                         # SGR mouse: btn;x;y then M(press)/m(release)
-                        command stty min 0 time 2 </dev/tty 2>/dev/null
                         _bcd_ml_mb=""; _bcd_ml_mf=""; _bcd_ml_i=0
                         while [ "$_bcd_ml_i" -lt 16 ]; do
-                            _bcd_ml_ch="$(dd bs=1 count=1 2>/dev/null </dev/tty)"
-                            [ -n "$_bcd_ml_ch" ] || break
-                            case "$_bcd_ml_ch" in
-                                M|m) _bcd_ml_mf="$_bcd_ml_ch"; break ;;
-                                *)   _bcd_ml_mb="$_bcd_ml_mb$_bcd_ml_ch" ;;
+                            __bettercd_readkey 0.05
+                            [ -n "$_bcd_key" ] || break
+                            case "$_bcd_key" in
+                                M|m) _bcd_ml_mf="$_bcd_key"; break ;;
+                                *)   _bcd_ml_mb="$_bcd_ml_mb$_bcd_key" ;;
                             esac
                             _bcd_ml_i=$((_bcd_ml_i + 1))
                         done
-                        command stty raw -echo </dev/tty 2>/dev/null
                         _bcd_ml_btn="${_bcd_ml_mb%%;*}"
                         _bcd_ml_my="${_bcd_ml_mb##*;}"
                         case "$_bcd_ml_btn$_bcd_ml_my" in *[!0-9]*) _bcd_ml_mf="" ;; esac
                         if [ -n "$_bcd_ml_mf" ]; then
                             case "$_bcd_ml_btn" in
-                                64) # wheel up: smooth-scroll the viewport, selection stays
-                                    [ "$_bcd_ml_off" -gt 0 ] && _bcd_ml_off=$((_bcd_ml_off - 1)) ;;
-                                65) # wheel down
-                                    [ "$_bcd_ml_off" -lt $(( _bcd_ml_n - _bcd_ml_vis )) ] && \
+                                64) [ "$_bcd_ml_off" -gt 0 ] && _bcd_ml_off=$((_bcd_ml_off - 1)) ;;
+                                65) [ "$_bcd_ml_off" -lt $(( _bcd_ml_n - _bcd_ml_vis )) ] && \
                                         _bcd_ml_off=$((_bcd_ml_off + 1)) ;;
-                                35) # hover: select the row under the pointer
+                                35) # hover selects the row under the pointer
                                     if [ -n "$_bcd_ml_top" ]; then
                                         _bcd_ml_ci=$(( _bcd_ml_my - _bcd_ml_top - 1 + _bcd_ml_off ))
                                         if [ "$_bcd_ml_ci" -ge "$_bcd_ml_off" ] && \
@@ -676,7 +732,6 @@ __bettercd_menu_loop() { # $1 list, $2 count
                                         fi
                                     fi ;;
                                 0)
-                                    # left press on a menu row → cd there
                                     if [ "$_bcd_ml_mf" = M ] && [ -n "$_bcd_ml_top" ]; then
                                         _bcd_ml_ci=$(( _bcd_ml_my - _bcd_ml_top - 1 + _bcd_ml_off ))
                                         if [ "$_bcd_ml_ci" -ge "$_bcd_ml_off" ] && \
@@ -688,20 +743,20 @@ __bettercd_menu_loop() { # $1 list, $2 count
                                 2) [ "$_bcd_ml_mf" = M ] && _bcd_ml_act=cancel ;;
                             esac
                         fi ;;
-                    '')        _bcd_ml_act=cancel ;;   # bare ESC
+                    '') _bcd_ml_act=cancel ;;   # bare ESC
                     *) ;;
                 esac ;;
             k|K) _bcd_ml_move=up ;;
             j|J) _bcd_ml_move=down ;;
-            "$_bcd_ml_cr") _bcd_ml_act=select ;;
-            ''|q|Q|"$_bcd_ml_etx") _bcd_ml_act=cancel ;;   # EOF / q / Ctrl-C
             g) _bcd_ml_sel=0; _bcd_ml_frame=$((_bcd_ml_frame + 1)) ;;
             G) _bcd_ml_sel=$((_bcd_ml_n - 1)); _bcd_ml_frame=$((_bcd_ml_frame + 1)) ;;
+            "$_bcd_ml_cr"|"$_bcd_ml_nl") _bcd_ml_act=select ;;
+            q|Q|"$_bcd_ml_etx") _bcd_ml_act=cancel ;;
             [1-9])
-                # digits pick within the VISIBLE window
                 if [ $(( _bcd_ml_off + _bcd_ml_key )) -le "$_bcd_ml_n" ]; then
                     _bcd_ml_sel=$(( _bcd_ml_off + _bcd_ml_key - 1 )); _bcd_ml_act=select
                 fi ;;
+            '') _bcd_ml_act=cancel ;;   # EOF
             *) ;;
         esac
         if [ "$_bcd_ml_move" = up ]; then
@@ -713,16 +768,16 @@ __bettercd_menu_loop() { # $1 list, $2 count
         fi
         [ -n "$_bcd_ml_act" ] && break
         # viewport follows the selection on KEYBOARD moves only — wheel
-        # scrolling must glide freely without yanking back to the selection
-        if [ -n "$_bcd_ml_move" ]; then
+        # scrolling glides freely without yanking back to the selection
+        if [ -n "$_bcd_ml_move" ] || [ "$_bcd_key" = g ] || [ "$_bcd_key" = G ]; then
             [ "$_bcd_ml_sel" -lt "$_bcd_ml_off" ] && _bcd_ml_off="$_bcd_ml_sel"
             [ "$_bcd_ml_sel" -ge $(( _bcd_ml_off + _bcd_ml_vis )) ] && \
                 _bcd_ml_off=$(( _bcd_ml_sel - _bcd_ml_vis + 1 ))
         fi
         # redraw only when something changed (hover floods motion events)
-        if [ "$_bcd_ml_sel" != "${_bcd_ml_psel-}" ] || [ "$_bcd_ml_off" != "${_bcd_ml_poff-}" ]; then
+        if [ "$_bcd_ml_sel" != "$_bcd_ml_psel" ] || [ "$_bcd_ml_off" != "$_bcd_ml_poff" ]; then
             printf '\033[%dA' "$_bcd_ml_lines" >/dev/tty
-            __bettercd_menu_draw "$_bcd_ml_list" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame" "$_bcd_ml_off" "$_bcd_ml_vis"
+            __bettercd_menu_draw "$_bcd_ml_disp" "$_bcd_ml_n" "$_bcd_ml_sel" "$_bcd_ml_frame" "$_bcd_ml_off" "$_bcd_ml_vis"
             _bcd_ml_psel="$_bcd_ml_sel"; _bcd_ml_poff="$_bcd_ml_off"
         fi
     done
@@ -741,6 +796,7 @@ __bettercd_menu_loop() { # $1 list, $2 count
     fi
     return 1   # cancel
 }
+
 
 # History replay (L2): reconstruct the ordered dirs a user actually stood in,
 # from their shell history, by SIMULATING cd across the whole file. One awk
