@@ -2,6 +2,12 @@
 
 ## Unreleased (v0.12.0)
 
+- Flag-shaped mistakes (`cd -.-`, `cd -Z`) now fail in-brand: `✻ -.- — no
+  such file or directory` (reason preserved from the builtin, prefix junk and
+  the arg echo stripped; scripts keep the raw error). Bonus fix: `cd -P dir`
+  and friends now route to the BUILTIN under zoxide mode — the zoxide delegate
+  chokes on flags (upstream does too), so multi-arg flag calls just failed.
+
 - **Bare `cd` opens the places table** on an interactive tty (scripts and
   non-tty keep the stock go-home exactly; `BETTERCD_BARE_MENU=0` restores
   classic always). `cd ~` still goes home instantly.

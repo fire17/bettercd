@@ -2603,6 +2603,13 @@ cd() {
             __bettercd_magic_menu forced
             return $?
         fi
+        case "${1-}" in
+            -*|+*)
+                # `cd -P dir` etc: flags mean BUILTIN semantics — the zoxide
+                # delegate chokes on them (upstream zoxide does too)
+                __bettercd_cd "$@" && __bettercd_clear_miss
+                return $? ;;
+        esac
         __bettercd_delegate "$@" && __bettercd_clear_miss
         return $?
     fi
@@ -2690,7 +2697,34 @@ cd() {
             __bettercd_delegate "$@" && __bettercd_clear_miss
             return $? ;;
         -* | +* )
-            # flags (-P/-L/-e/…) and zsh dir-stack refs (+2/-2): builtin semantics
+            # flags (-P/-L/-e/…) and zsh dir-stack refs (+2/-2): builtin
+            # semantics — but on an interactive tty a failure is re-dressed
+            # in-brand instead of leaking the raw "__bettercd_cd:cd: …" line.
+            # (Cold path: only flag-shaped args land here, so the stderr
+            # capture file costs nothing on real navigation.)
+            if __bettercd_interactive && [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+                _bcd_fe="${TMPDIR:-/tmp}/.bcd_fe.$$"
+                if __bettercd_cd "$@" 2>"$_bcd_fe"; then
+                    __bettercd_clear_miss
+                    command rm -f "$_bcd_fe" 2>/dev/null
+                    return 0
+                fi
+                _bcd_frc=$?
+                _bcd_fmsg=""
+                IFS= read -r _bcd_fmsg < "$_bcd_fe" 2>/dev/null
+                command rm -f "$_bcd_fe" 2>/dev/null
+                # strip shell/function prefixes: "__bettercd_cd:cd: reason: arg"
+                while :; do
+                    case "$_bcd_fmsg" in
+                        *cd:\ *) _bcd_fmsg="${_bcd_fmsg#*cd: }" ;;
+                        *) break ;;
+                    esac
+                done
+                _bcd_fmsg="${_bcd_fmsg%: "$1"}"   # we lead with the arg — drop its echo
+                [ -n "$_bcd_fmsg" ] || _bcd_fmsg="invalid cd arguments"
+                printf '\033[38;5;213m✻\033[0m \033[1;36m%s\033[0m \033[2m— %s\033[0m\n' "$*" "$_bcd_fmsg" >&2
+                return "$_bcd_frc"
+            fi
             __bettercd_cd "$@" && __bettercd_clear_miss
             return $? ;;
     esac
