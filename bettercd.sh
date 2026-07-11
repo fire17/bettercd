@@ -682,6 +682,50 @@ __BCD_EOF__
     return 1
 }
 
+# Dash-count time travel: jump N dirs back through this session's distinct
+# history (OLDPWD first, then the recent-places trail). The dir you leave is
+# recorded by the precmd hook, so repeating `cd --` cycles a 3-dir ring the
+# same way `cd -` cycles two. Vanished targets get the inode treatment.
+__bettercd_njump() { # $1 = N (2+)
+    _bcd_nj_n="$1"; _bcd_nj_i=0; _bcd_nj_t=""
+    _bcd_nj_seen="
+$PWD
+"
+    while IFS= read -r _bcd_nj_d; do
+        [ -n "$_bcd_nj_d" ] || continue
+        case "$_bcd_nj_seen" in *"
+$_bcd_nj_d
+"*) continue ;; esac
+        _bcd_nj_seen="$_bcd_nj_seen$_bcd_nj_d
+"
+        _bcd_nj_i=$(( _bcd_nj_i + 1 ))
+        if [ "$_bcd_nj_i" -eq "$_bcd_nj_n" ]; then _bcd_nj_t="$_bcd_nj_d"; break; fi
+    done <<__BCD_EOF__
+${OLDPWD-}
+${_BETTERCD_RECENT-}
+__BCD_EOF__
+    if [ -z "$_bcd_nj_t" ]; then
+        if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+            printf '\033[38;5;213m✻\033[0m \033[2monly %s distinct dir(s) of history so far — need %s\033[0m\n' "$_bcd_nj_i" "$_bcd_nj_n" >&2
+        else
+            printf 'bettercd: only %s distinct dir(s) of history so far — need %s\n' "$_bcd_nj_i" "$_bcd_nj_n" >&2
+        fi
+        return 1
+    fi
+    if [ ! -d "$_bcd_nj_t" ]; then
+        __bettercd_vanished "$_bcd_nj_t"
+        return $?
+    fi
+    if __bettercd_delegate "$_bcd_nj_t"; then
+        __bettercd_clear_miss
+        if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+            printf '\033[38;5;213m✻\033[0m \033[2m↶%s\033[0m \033[1;36m%s\033[0m\n' "$_bcd_nj_n" "$(__bettercd_home_rel "$_bcd_nj_t")" >&2
+        fi
+        return 0
+    fi
+    return 1
+}
+
 __bettercd_dash_arm() { # $1 = now (epoch secs)
     case "${1-}" in ''|*[!0-9]*) return 0 ;; esac
     _BETTERCD_LAST_DASH="$1"
@@ -1414,7 +1458,13 @@ __BCD_EOF__
     [ "$_bcd_ml_vis" -le "${_bcd_ml_basen:-0}" ] || _bcd_ml_vis="${_bcd_ml_basen:-0}"
     [ "$_bcd_ml_vis" -ge 1 ] || _bcd_ml_vis=1
     # L1 query-echo + L2 context + rows + position + legend + keys
-    _bcd_ml_lines=$(( _bcd_ml_vis + 5 ))
+    # realcmd: header is the FIRST frame line (no spacer — the tinted header
+    # provides the visual separation now). fallback keeps the ⌕ echo line.
+    if [ "${_bcd_ml_pmode:-fallback}" = realcmd ]; then
+        _bcd_ml_lines=$(( _bcd_ml_vis + 4 )); _bcd_ml_rowoff=1
+    else
+        _bcd_ml_lines=$(( _bcd_ml_vis + 5 )); _bcd_ml_rowoff=2
+    fi
     [ "$_bcd_ml_off" -gt $(( _bcd_ml_n - _bcd_ml_vis )) ] && _bcd_ml_off=$(( _bcd_ml_n - _bcd_ml_vis ))
     [ "$_bcd_ml_off" -lt 0 ] && _bcd_ml_off=0
     [ "$_bcd_ml_sel" -lt "$_bcd_ml_off" ] && _bcd_ml_off="$_bcd_ml_sel"
@@ -1517,7 +1567,9 @@ __bettercd_stream_manage() {
 # Header column SGR: BOLD-WHITE when $1 is the active sort column ($_bcd_hac),
 # else bold-dim. Kept fork-free; called once per visible column each table draw.
 __bettercd_hcol() { # $1 col name -> sets _bcd_hcs (SGR start, bg preserved)
-    if [ "$1" = "$_bcd_hac" ]; then _bcd_hcs="${_BETTERCD_ESC}[1;97m"
+    # the Directory title is ALWAYS bold-white (user ask); other labels go
+    # bold-white only while they are the active sort column
+    if [ "$1" = name ] || [ "$1" = "$_bcd_hac" ]; then _bcd_hcs="${_BETTERCD_ESC}[1;97m"
     else _bcd_hcs="${_BETTERCD_ESC}[2m"; fi
 }
 
@@ -1532,8 +1584,8 @@ __bettercd_menu_draw() {
     # the typed query is painted onto the user's REAL command line by the park
     # fn, so it visually continues "cd -- ". In fallback mode (bash / prompt not
     # measurable) the query echoes here after a ⌕ marker, bold-cyan.
-    if [ "${_bcd_ml_realpark:-0}" = 1 ]; then
-        _bcd_df="${_bcd_dE}[K$_bcd_dL"
+    if [ "${_bcd_ml_pmode:-fallback}" = realcmd ]; then
+        _bcd_df=""   # no spacer — the query lives on the real command line
     else
         _bcd_df="  ${_bcd_dE}[38;5;213m$_BETTERCD_MAG${_bcd_dE}[0m ${_bcd_dE}[1;36m$_bcd_ml_query${_bcd_dE}[0m${_bcd_dE}[K$_bcd_dL"
     fi
@@ -1889,6 +1941,12 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
     _bcd_ml_psel=-1; _bcd_ml_poff=-1; _bcd_ml_plines=0
     _bcd_ml_sort=recent; _bcd_ml_preset=all; _bcd_ml_query=""
     _bcd_ml_table=0; _bcd_ml_full=0; _bcd_ml_flashrow=-1; _bcd_ml_cachenote=0
+    # a menu open is its own freshness proof: never queue the toast here, and
+    # KILL any armed toast-eraser/animator — their delayed ESC7/ESC8 save/
+    # restore firing mid-menu corrupts the parked cursor (observed live; the
+    # failing repros always followed an autoreload toast, clean runs never did)
+    _BETTERCD_UPD_PENDING=""
+    __bettercd_anim_kill
     __bettercd_prefs_load
     __bettercd_glyphs
     __bettercd_visits_load
@@ -1908,7 +1966,17 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
     _bcd_ml_cmdw="${#_bcd_invoke}"
     __bettercd_prompt_width
     _bcd_ml_pmode=fallback; _bcd_ml_qcol=0
-    if [ -n "${ZSH_VERSION-}" ] && [ -n "${_bcd_pw:-}" ] && [ -n "${_bcd_invoke:-}" ]; then
+    # best source: the MEASURED cursor cell captured at Enter-time by the
+    # zle-line-finish hook — exact under dynamic/transient prompts (p10k etc.)
+    # where a static PS1-width calc lies. Single-use; falls back to the calc.
+    case "${_BETTERCD_CMD_END_COL-}" in
+        ''|*[!0-9]*) ;;
+        *)
+            _bcd_ml_qcol=$(( _BETTERCD_CMD_END_COL + 1 ))
+            [ "$_bcd_ml_qcol" -lt $(( _bcd_ml_cols - 4 )) ] && _bcd_ml_pmode=realcmd ;;
+    esac
+    _BETTERCD_CMD_END_COL=""
+    if [ "$_bcd_ml_pmode" = fallback ] && [ -n "${ZSH_VERSION-}" ] && [ -n "${_bcd_pw:-}" ] && [ -n "${_bcd_invoke:-}" ]; then
         _bcd_ml_qcol=$(( _bcd_pw + _bcd_ml_cmdw + 2 ))
         [ "$_bcd_ml_qcol" -lt $(( _bcd_ml_cols - 4 )) ] && _bcd_ml_pmode=realcmd
     fi
@@ -1985,7 +2053,7 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
                                     # rows start at top+2 now (L1 query echo, L2
                                     # context header sit above them), so map -2
                                     if [ -n "$_bcd_ml_top" ]; then
-                                        _bcd_ml_ci=$(( _bcd_ml_my - _bcd_ml_top - 2 + _bcd_ml_off ))
+                                        _bcd_ml_ci=$(( _bcd_ml_my - _bcd_ml_top - ${_bcd_ml_rowoff:-2} + _bcd_ml_off ))
                                         if [ "$_bcd_ml_ci" -ge "$_bcd_ml_off" ] && \
                                            [ "$_bcd_ml_ci" -lt $(( _bcd_ml_off + _bcd_ml_vis )) ] && \
                                            [ "$_bcd_ml_ci" -lt "$_bcd_ml_n" ]; then
@@ -1996,7 +2064,7 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
                                     if [ "$_bcd_ml_mf" = M ] && [ -n "$_bcd_ml_top" ]; then
                                         # W3: a click on the L2 column-header row
                                         # (top+1) in table mode sorts by that column
-                                        if [ "$_bcd_ml_table" = 1 ] && [ "$_bcd_ml_my" -eq $(( _bcd_ml_top + 1 )) ]; then
+                                        if [ "$_bcd_ml_table" = 1 ] && [ "$_bcd_ml_my" -eq $(( _bcd_ml_top + ${_bcd_ml_rowoff:-2} - 1 )) ]; then
                                             __bettercd_col_resolve "$_bcd_ml_mx" "$_bcd_ml_cols"
                                             if [ -n "$_bcd_col" ]; then
                                                 __bettercd_sort_click "$_bcd_col"
@@ -2004,7 +2072,7 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
                                                 __bettercd_menu_rebuild A
                                             fi
                                         else
-                                            _bcd_ml_ci=$(( _bcd_ml_my - _bcd_ml_top - 2 + _bcd_ml_off ))
+                                            _bcd_ml_ci=$(( _bcd_ml_my - _bcd_ml_top - ${_bcd_ml_rowoff:-2} + _bcd_ml_off ))
                                             if [ "$_bcd_ml_ci" -ge "$_bcd_ml_off" ] && \
                                                [ "$_bcd_ml_ci" -lt $(( _bcd_ml_off + _bcd_ml_vis )) ] && \
                                                [ "$_bcd_ml_ci" -lt "$_bcd_ml_n" ]; then
@@ -2526,6 +2594,15 @@ cd() {
     fi
     # fast passthroughs: no args, multiple args, flags, "-", dir-stack refs
     if [ "$#" -ne 1 ]; then
+        # bare `cd` on an interactive tty opens the places table (the menu IS
+        # the better "where do I want to be"); scripts and non-tty keep the
+        # stock go-home exactly. BETTERCD_BARE_MENU=0 restores classic always.
+        if [ "$#" -eq 0 ] && [ "${BETTERCD_BARE_MENU-1}" != 0 ] \
+           && __bettercd_interactive && __bettercd_tty_ok; then
+            _bcd_invoke="cd"
+            __bettercd_magic_menu forced
+            return $?
+        fi
         __bettercd_delegate "$@" && __bettercd_clear_miss
         return $?
     fi
@@ -2534,6 +2611,13 @@ cd() {
             __bettercd_delegate "$@" && __bettercd_clear_miss
             return $? ;;
         - )
+            # no OLDPWD yet: the builtin would leak "__bettercd_cd:cd: string
+            # not in pwd: -" — say it in-brand instead (scripts keep stock)
+            if [ -z "${OLDPWD-}" ] && __bettercd_interactive && [ -t 2 ] \
+               && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+                printf '\033[38;5;213m✻\033[0m \033[2mnowhere to go back to yet — this shell hasn'"'"'t changed dirs\033[0m\n' >&2
+                return 1
+            fi
             # vanished toggle target: pretty in-brand message (and auto-follow
             # a same-filesystem move) instead of the delegate's raw error.
             # Interactive only — scripts keep the stock failure exactly.
@@ -2560,17 +2644,6 @@ cd() {
             esac
             __bettercd_delegate "$@" && __bettercd_clear_miss
             return $? ;;
-        -- )
-            # `cd --` opens the dropdown directly — explicit invocation is
-            # consent, independent of the auto-magic setting.
-            if __bettercd_interactive; then
-                __bettercd_dash_arm "$(date +%s 2>/dev/null)"
-                _bcd_invoke="cd --"   # W1': park the query after the real command
-                __bettercd_magic_menu forced
-                return $?
-            fi
-            __bettercd_delegate "$@" && __bettercd_clear_miss
-            return $? ;;
         --help | -h )
             __bettercd_help
             return 0 ;;
@@ -2586,13 +2659,26 @@ cd() {
         --update )   bettercd update;  return $? ;;
         --config | --prefs ) bettercd config; return $? ;;
         --* )
-            # unknown long flag: never a dir, never a raw builtin error
-            if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
-                printf '\033[38;5;213m✻\033[0m \033[2munknown flag\033[0m \033[1;36m%s\033[0m \033[2m— try\033[0m \033[1mcd --help\033[0m\n' "$1" >&2
-            else
-                printf 'bettercd: unknown flag %s — try cd --help\n' "$1" >&2
+            # all-dashes = TIME TRAVEL: `cd --` = 2 dirs back, `cd ---` = 3
+            # back, and so on — the dash count is how far back you jump, and
+            # repeating it cycles naturally (the dir you leave becomes recent).
+            # Scripts/non-tty keep stock behavior (POSIX `cd --` = home).
+            # Anything else (--bogus) = unknown flag: never a dir, never raw.
+            case "$1" in
+                *[!-]*)
+                    if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+                        printf '\033[38;5;213m✻\033[0m \033[2munknown flag\033[0m \033[1;36m%s\033[0m \033[2m— try\033[0m \033[1mcd --help\033[0m\n' "$1" >&2
+                    else
+                        printf 'bettercd: unknown flag %s — try cd --help\n' "$1" >&2
+                    fi
+                    return 1 ;;
+            esac
+            if __bettercd_interactive; then
+                __bettercd_njump "${#1}"
+                return $?
             fi
-            return 1 ;;
+            __bettercd_delegate "$@" && __bettercd_clear_miss
+            return $? ;;
         ... | ....* )
             # dot-runs WITH a space (the aliases only catch cd..): cd ... = up 2
             case "$1" in *[!.]*) ;; *)
@@ -2611,6 +2697,13 @@ cd() {
 
     # happy path: the directory exists — zero-overhead passthrough
     if [ -d "$1" ]; then
+        # unenterable dir (no +x): say it in-brand instead of leaking the raw
+        # builtin error — one builtin test, hot path stays fork/IO-free
+        if [ ! -x "$1" ] && __bettercd_interactive && [ -t 2 ] \
+           && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+            printf '\033[38;5;213m✻\033[0m \033[2mcan'"'"'t enter\033[0m \033[1;36m%s\033[0m \033[2m— permission denied\033[0m\n' "$1" >&2
+            return 1
+        fi
         __bettercd_delegate "$1" && __bettercd_clear_miss
         return $?
     fi
@@ -2738,6 +2831,37 @@ if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
     esac
 fi
 
+# W1'' measured park column: at Enter-time (zle-line-finish, AFTER any prior
+# widget — e.g. p10k transient prompt — so we measure the FINAL rendered line)
+# capture the exact cursor cell right after the typed command via one CPR.
+# Gated to `cd -*` buffers: zero cost for every other command. zsh only.
+if [ -n "${ZSH_VERSION-}" ]; then
+    eval '
+    if (( ${+functions[zle-line-finish]} )) && \
+       [[ ${functions[zle-line-finish]} != *__bettercd_zlf* ]]; then
+        functions[__bettercd_prev_zlf]="${functions[zle-line-finish]}"
+    fi
+    __bettercd_zlf() {
+        (( ${+functions[__bettercd_prev_zlf]} )) && __bettercd_prev_zlf "$@"
+        case $BUFFER in
+            "cd -"*)
+                local _rep="" _ch=""
+                printf "\033[6n" > /dev/tty
+                while read -s -t 0.2 -k 1 _ch < /dev/tty; do
+                    [[ $_ch == R ]] && break
+                    _rep+=$_ch
+                done
+                _rep=${_rep##*\[}
+                _BETTERCD_CMD_END_COL=${_rep##*;}
+                [[ $_BETTERCD_CMD_END_COL == <-> ]] || _BETTERCD_CMD_END_COL=""
+                ;;
+        esac
+    }
+    zle-line-finish() { __bettercd_zlf "$@"; }
+    zle -N zle-line-finish 2>/dev/null
+    '
+fi
+
 # prompt hooks that stop the sparkle animator once the screen scrolls
 if [ -n "${ZSH_VERSION-}" ]; then
     eval 'typeset -ga precmd_functions preexec_functions
@@ -2844,9 +2968,10 @@ __bettercd_help() {
         "cd sr"             "typo guard: 'did you mean src/ ?' before junk is made" \
         "cd app.py:42:7"    "pasted stack-trace paths just work (→ the file's dir)" \
         "cd.."              "the no-space classic — cd.. cd... cd.... all real" \
-        "cd -"              "classic toggle · vanished dirs auto-followed by inode" \
+        "cd"                "just cd: the ✻ places table (scripts still go home)" \
+        "cd -"              "toggle · cd -- = 2 back · cd --- = 3 back · ↶ cycles" \
         "undo-cd"           "go back + remove exactly what was created (rmdir-only)"
-    printf "\n  ${_bh_S}THE DROPDOWN${_bh_R}  ${_bh_D}(cd -- · your places: live + zoxide + replayed history)${_bh_R}\n"
+    printf "\n  ${_bh_S}THE DROPDOWN${_bh_R}  ${_bh_D}(just cd · your places: live + zoxide + replayed history)${_bh_R}\n"
     printf "    ${_bh_C}%-24s${_bh_R} ${_bh_D}%s${_bh_R}\n" \
         "↑↓ jk · wheel · hover" "move — wheel glides the list, hover grabs" \
         "⏎ / click · 1-9 · esc" "go · pick row · leave" \

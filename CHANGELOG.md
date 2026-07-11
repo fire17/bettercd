@@ -2,6 +2,25 @@
 
 ## Unreleased (v0.12.0)
 
+- **Bare `cd` opens the places table** on an interactive tty (scripts and
+  non-tty keep the stock go-home exactly; `BETTERCD_BARE_MENU=0` restores
+  classic always). `cd ~` still goes home instantly.
+- **Dash-count time travel:** `cd -` stays the classic toggle; `cd --` jumps
+  2 distinct dirs back, `cd ---` 3 back, and so on — repeating cycles
+  naturally (`✻ ↶2 ~/path` note). Distinctness is per prompt (a compound
+  `cd a && cd b` is one hop). Scripts keep POSIX `cd --` = home. The menu is
+  no longer on `cd --`.
+- The typed-query cursor parks at the TRUE end of your command line —
+  measured at Enter-time via a zle-line-finish CPR (chains p10k et al., so
+  transient/dynamic prompts are exact; static PS1 math was ~2× off there) —
+  and the pre-menu auto-update toast's delayed eraser is killed at menu open
+  (its ESC7/ESC8 restore was corrupting the parked cursor, nondeterministically).
+- Spacer line removed (the tinted header separates); `Directory` title always
+  bold-white; the auto-update toast never shows around a menu open.
+- Pretty errors: `cd -` with no history yet → `✻ nowhere to go back to yet`;
+  an unenterable dir → `✻ can't enter <dir> — permission denied` (zero-cost
+  -x pre-check; scripts keep raw errors).
+
 - The `✻ bettercd auto-updated to <ver>` notice is now a **centered, self-erasing
   toast**: it prints centered on its own line at the next prompt and clears
   itself after 2 seconds. If you run another command first, it simply stays in

@@ -813,6 +813,37 @@ else
     __bettercd_prompt_width; [ -z "$_bcd_pw" ]; check "promptwidth: non-zsh returns empty (fallback)" $?
 fi
 
+# 33. dash-count time travel + bare-cd routing pins
+if [ -n "${ZSH_VERSION-}${BASH_VERSION-}" ]; then
+    mkdir -p "$TMP/tt/A" "$TMP/tt/B" "$TMP/tt/C"
+    cd "$TMP/tt/C"
+    OLDPWD="$TMP/tt/A"
+    _BETTERCD_RECENT="$TMP/tt/A
+$TMP/tt/B
+$TMP/tt/C
+"
+    _BETTERCD_FORCE_INTERACTIVE=1
+    cd -- 2>/dev/null   # 2 back: A(1st distinct) then B(2nd)
+    [ "$PWD" = "$TMP/tt/B" ]; check "cd -- jumps 2 back" $?
+    cd "$TMP/tt/C"; OLDPWD="$TMP/tt/A"
+    _BETTERCD_RECENT="$TMP/tt/A
+$TMP/tt/B
+$TMP/tt/C
+"
+    cd --- 2>/dev/null  # 3 back: A, B, then... only 2 distinct besides PWD → error
+    rc=$?
+    [ "$rc" -ne 0 ] && [ "$PWD" = "$TMP/tt/C" ]; check "cd --- with short history refuses honestly" $?
+    unset _BETTERCD_FORCE_INTERACTIVE
+    # scripts: cd -- keeps stock (POSIX: home), bare cd keeps home
+    cd "$TMP/tt/C"
+    cd -- >/dev/null 2>&1 </dev/null
+    [ "$PWD" = "$HOME" ]; check "non-interactive cd -- keeps stock home" $?
+    cd "$TMP/tt/C"
+    cd >/dev/null 2>&1 </dev/null
+    [ "$PWD" = "$HOME" ]; check "non-interactive bare cd keeps home" $?
+    cd "$TMP"
+fi
+
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
 rm -rf "$TMP"
