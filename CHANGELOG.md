@@ -2,6 +2,75 @@
 
 ## Unreleased (v0.12.0)
 
+- **Outside-cwd creates are one step, not two.** The old flow failed once with a
+  hint (`repeat to create it`) and only asked `[y/N]` if you retyped the exact
+  same command. Now a single line states the miss *and* asks in the same breath —
+  `✻ ~/ContextArt doesn't exist — outside your current dir · create it? [y/N]` —
+  so it costs one keystroke instead of a retype. Safety is unchanged: still never
+  silent, still `[y/N]`-gated with a `not created` receipt on anything but `y`,
+  and scripts / non-tty / `BETTERCD_QUIET=1` still get the plain
+  `cd: no such file or directory` with **no** prompt and no hang. The now-dead
+  "last miss" state machine was removed with it.
+
+- **`cd apiv2` now finds a directory you have never visited.** zoxide can only
+  know where you have *been*: a dir that exists but was never entered is a
+  no-match for it, so `cd apiv2` sailed past a real `./src/services/apiv2` and
+  offered to CREATE `./apiv2`. On a miss (interactive tty only) bettercd now
+  resolves the name against real disk before it ever talks about creating —
+  **cwd subtree first, then `$HOME`** — ranked exact basename > prefix >
+  substring, shallowest wins — jumps with a `✻ ↪ <path>` note, and **teaches
+  zoxide the path** (`zoxide add`), so the next time is an instant frecency jump
+  and the search never runs again. Self-improving by design.
+  - **Semantic change, on purpose:** `cd apiv2` where `./src/services/apiv2`
+    exists now JUMPS there instead of creating `./apiv2`. `cd apiv2/` (trailing
+    slash = explicit create intent) still creates and skips the search entirely,
+    and the typo-guard / auto-create / outside-cwd `[y/N]` flow is unchanged —
+    it just runs only when the search found nothing. `BETTERCD_JUMP=0` opts out.
+    Only bare relative names are searched: `cd src/apiv2`, absolutes and flags
+    keep the classic path (a slash means you already know the layout).
+  - **Perf, measured (34 020-dir tree):** hit **173 ms**, worst-case total miss
+    (cwd + `$HOME`, nothing found anywhere) **474 ms**, a miss standing in `$HOME`
+    itself **67 ms**. The happy path pays NOTHING — this only ever runs after a
+    miss. Getting there took two fixes worth naming: the first cut ran a `find`
+    per tier per root (six walks — **38 seconds** of dead shell on a miss), now
+    it is ONE pruned pass per root with the tiers decided in-shell, fork-free;
+    and standing in `$HOME` used the deep project profile, which walked
+    `~/Library` (**12.8 s**) — the scan profile now follows the root, so `$HOME`
+    always gets the shallow, heavily-pruned sweep. `/` is never swept.
+
+- **`cd docs*` opens the places table, pre-filtered.** A trailing star is read as
+  "show me the places that look like this": the same dropdown as bare `cd`, with
+  `docs` already typed as the query, ranked zoxide-list first → **current tree** →
+  everywhere else, all streaming in. Keep typing to narrow. **Backspace floors at
+  the word you typed** (it is your text, not ours — the menu can never chew into
+  it); `esc` clears the whole query (that word included) and moves the query echo
+  onto the frame so it keeps telling the truth; `esc` again cancels.
+  - **zsh: your command line is never rewritten.** The obvious implementation —
+    escaping the star in `BUFFER` at `zle-line-finish` — was built, tried, and
+    **rejected**: it repaints, so the accepted line visibly turns into `cd bett\*`.
+    Instead the star word is *read* off the line at Enter-time and stashed
+    (single-use, cleared every line), and `cd()` routes on it, ignoring whatever
+    the glob expanded to — so `cd bett*` opens the table **even in a directory
+    that has a real `bettercd/`**, which is the whole point. `NOMATCH` is lifted
+    for that one command (restored at the next `precmd`) so the no-match case
+    reaches `cd()` instead of aborting the line. Only the exact shape
+    `cd <one-bare-word>*` is ever claimed: quoted, flagged, multi-word, or other
+    glob metachars (`cd ~/p*/src`, `cd 'a*'`, `cd a?*`, `cd a*b*`) keep stock zsh
+    globbing, untouched.
+  - **bash is honest, not clever:** an unmatched `cd zzz*` reaches the table
+    (bash passes the literal through), but a glob that *does* match is expanded
+    before `cd` is called — so `cd bett*` there just cds (single match) or errors
+    with too many arguments (several). `cd 'bett*'` forces the table. No bash
+    rewrite is attempted.
+  - **Cost, honestly:** on an interactive tty a directory literally *named* `foo*`
+    is no longer reachable via `cd foo*` (use `cd ./foo*/`). Scripts and non-tty
+    shells are untouched — no menu, no routing change, stock behavior byte for byte.
+  - Measured (200-place pool, bash): pre-filtered open **14 ms**, added keystrokes
+    **~1 ms/key**, still zero forks per key. On a pathological pool where *every*
+    row matches *every* prefix, a keystroke costs the same as it does in today's
+    bare menu (38 vs 36 ms/key) — that worst case is the pre-existing query-stack
+    behavior, not something the star adds.
+
 - Flag-shaped mistakes (`cd -.-`, `cd -Z`) now fail in-brand: `✻ -.- — no
   such file or directory` (reason preserved from the builtin, prefix junk and
   the arg echo stripped; scripts keep the raw error). Bonus fix: `cd -P dir`

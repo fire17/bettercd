@@ -106,8 +106,6 @@ __bettercd_interactive() {
     [ -t 0 ] && [ -t 2 ]
 }
 
-__bettercd_clear_miss() { _BETTERCD_LAST_MISS=""; }
-
 # Seamless autoreload (interactive shells): remember where we were sourced
 # from and stamp the load. Every cd does a ZERO-FORK freshness check — builtin
 # `[ file -nt file ]` (one stat syscall) + a builtin read of the stamp — and
@@ -172,6 +170,7 @@ _BETTERCD_TAB="$(printf '\t')"
 _BETTERCD_ELL="$(printf '\342\200\246')"
 _BETTERCD_MAG="$(printf '\342\214\225')"   # ⌕ — fallback query marker (W1')
 _BETTERCD_GS="$(printf '\035')"            # GS — W7 query-stack level delimiter (never in a path)
+_BETTERCD_BSL="$(printf '\134')"           # a literal backslash (printf-built: keeps the star-rewrite guard readable)
 # sort-direction arrows, printf-built for the same reason: bash mangles a
 # multibyte LITERAL concatenated into a var, but a printf-built var is safe.
 _BETTERCD_UARR="$(printf '\342\206\221')"   # ↑
@@ -347,13 +346,12 @@ __BCD_EOF__
         ''|y|Y|yes|YES)
             if [ "$_bcd_gparent" = "/" ]; then _bcd_jump="/$_bcd_first"
             else _bcd_jump="$_bcd_gparent/$_bcd_first"; fi
-            __bettercd_delegate "$_bcd_jump" && __bettercd_clear_miss
+            __bettercd_delegate "$_bcd_jump"
             _bcd_guard_rc=$?
             return 1 ;;
         c|C)
             return 0 ;;
         *)
-            __bettercd_clear_miss
             printf 'bettercd: aborted.\n' >&2
             _bcd_guard_rc=1
             return 1 ;;
@@ -485,6 +483,14 @@ __bettercd_history_hint() {
 # after all command output, so the glyph row can be computed exactly, even
 # at the bottom of the screen. Any prompt after that means a scroll: kill.
 __bettercd_anim_precmd() {
+    # `cd name*` teardown (zsh): the star stash lives for exactly ONE command —
+    # drop it here so it can never route a later plain cd, and give the user
+    # their NOMATCH option back (we lifted it at Enter for that one line only).
+    if [ -n "${_BETTERCD_STAR_NOMATCH-}" ]; then
+        _BETTERCD_STAR_NOMATCH=""
+        eval 'setopt nomatch' 2>/dev/null
+    fi
+    _BETTERCD_STAR_Q=""
     # recent-places tracking (magic cd -): catches EVERY cwd change — our cd,
     # pushd, autocd. Hot path, so pure string ops, zero forks, no dedup/cap
     # here; the menu dedups + drops $PWD + caps at 8 lazily when it opens.
@@ -602,7 +608,6 @@ __bettercd_create_and_cd() {
     _BETTERCD_UNDO_FROM="$_bcd_from"
     _BETTERCD_UNDO_CREATED="$_bcd_created"
     _BETTERCD_UNDO_TARGET="$_bcd_target"
-    __bettercd_clear_miss
     if [ "${BETTERCD_QUIET-0}" != 1 ]; then
         if __bettercd_fancy; then
             # announced by the precmd hook, after all command output
@@ -670,7 +675,7 @@ __BCD_EOF__
         else
             printf 'bettercd: %s is now %s — taking you there\n' "$1" "$_bcd_vnew" >&2
         fi
-        __bettercd_delegate "$_bcd_vnew" && __bettercd_clear_miss
+        __bettercd_delegate "$_bcd_vnew"
         return $?
     fi
     if [ -n "$__bettercd_colors_v" ]; then
@@ -717,7 +722,6 @@ __BCD_EOF__
         return $?
     fi
     if __bettercd_delegate "$_bcd_nj_t"; then
-        __bettercd_clear_miss
         if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
             printf '\033[38;5;213m✻\033[0m \033[2m↶%s\033[0m \033[1;36m%s\033[0m\n' "$_bcd_nj_n" "$(__bettercd_home_rel "$_bcd_nj_t")" >&2
         fi
@@ -1502,8 +1506,15 @@ __bettercd_stream_start() { # $1 query — launch the detached search
     # bounded find (head -N → pipe-close) self-terminates even if we never kill it.
     _bcd_ml_streamf="${TMPDIR:-/tmp}/bettercd.$$.stream"
     command rm -f "$_bcd_ml_streamf" 2>/dev/null; : > "$_bcd_ml_streamf" 2>/dev/null
+    # Stage order IS the ranking the user asked for: zoxide's own list first
+    # (real frecency), then the CURRENT TREE (what's under your feet beats what's
+    # across the disk), then the bounded $HOME sweep. Results are ingested in
+    # arrival order and the subsequence filter preserves it, so the rows land in
+    # exactly this order. The PWD sweep is skipped when PWD is HOME (it would be
+    # the same scan); overlap anywhere is handled by the ingest dedupe.
     _bcd_ml_job="$( ( {
             command -v zoxide >/dev/null 2>&1 && command zoxide query --list "$1" 2>/dev/null | head -15
+            [ "$PWD" != "$HOME" ] && command find "$PWD" -maxdepth 4 -type d -iname "*$1*" 2>/dev/null | head -10
             command find "$HOME" -maxdepth 4 -type d -iname "*$1*" 2>/dev/null | head -15
         } >> "$_bcd_ml_streamf" 2>/dev/null </dev/null & printf '%s' $! ) )"
 }
@@ -1729,6 +1740,8 @@ ${_bcd_hE}[2m  P pin (float to top, persists)   T mark project (.project/)${_bcd
 ${_bcd_hE}[2m  V table   R sort   click a header = sort by that column   L preset${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
 ${_bcd_hE}[2m  S size   E icons↔emoji   U parent   F full/home path${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
 ${_bcd_hE}[2m  O reveal in Finder   esc clears query / cancels${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
+${_bcd_hE}[2m  cd name* opens here pre-filtered — backspace stops at that word,${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
+${_bcd_hE}[2m  esc clears the whole query (the word included), esc again cancels${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
 ${_bcd_hE}[2m  ⚑pin ●clean ◐modified ○untracked ▪project +found${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL\
 ${_bcd_hE}[38;5;213m  press any key${_bcd_hE}[0m${_bcd_hE}[K$_bcd_hL" >/dev/tty
     __bettercd_readkey ""
@@ -1816,8 +1829,11 @@ __bettercd_menu_measure() {
 # only the pre-measure first frame uses the relative form.
 __bettercd_menu_park() {
     if [ "${_bcd_ml_realpark:-0}" = 1 ] && [ -n "${_bcd_ml_top:-}" ]; then
+        # paint only what WE added: the q0 prefix (`cd docs*`) is the user's own
+        # typed text, already on the line — never repaint it, never overwrite it.
+        _bcd_ml_qadd="${_bcd_ml_query#"${_bcd_ml_q0-}"}"
         printf '\033[%d;%dH\033[1;36m%s\033[0m\033[K' \
-            "$(( _bcd_ml_top - 1 ))" "$_bcd_ml_qcol" "$_bcd_ml_query" >/dev/tty
+            "$(( _bcd_ml_top - 1 ))" "$_bcd_ml_qcol" "$_bcd_ml_qadd" >/dev/tty
     elif [ -n "${_bcd_ml_top:-}" ]; then
         printf '\033[%d;%dH' "$_bcd_ml_top" "$(( 5 + ${#_bcd_ml_query} ))" >/dev/tty
     else
@@ -1858,6 +1874,12 @@ __bettercd_qfwd() {
     [ -n "$_bcd_ml_curp" ] && __bettercd_menu_reselect "$_bcd_ml_curp"
     __bettercd_menu_geom
     _bcd_ml_rebuild=1
+}
+# The q0 FLOOR: backspace may pop the chars WE painted, never into the word the
+# user typed themselves (`cd docs*` → "docs" stays). rc0 = a pop is allowed.
+__bettercd_q_canpop() {
+    _bcd_qc_f="${_bcd_ml_q0-}"
+    [ "${#_bcd_ml_query}" -gt "${#_bcd_qc_f}" ]
 }
 # Backspace: POP the cached shorter-prefix level (instant); if the stack was
 # invalidated meanwhile, fall back to a full re-filter from the base.
@@ -1939,7 +1961,12 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
     _bcd_ml_pool="$1"
     _bcd_ml_sel=0; _bcd_ml_frame=0; _bcd_ml_off=0
     _bcd_ml_psel=-1; _bcd_ml_poff=-1; _bcd_ml_plines=0
-    _bcd_ml_sort=recent; _bcd_ml_preset=all; _bcd_ml_query=""
+    _bcd_ml_sort=recent; _bcd_ml_preset=all
+    # q0 = a pre-typed query (`cd docs*` → "docs"): the list opens already
+    # filtered, and it is the FLOOR the backspace can never chew through (those
+    # chars are the user's own typed text on the real command line, not ours).
+    _bcd_ml_q0="${_bcd_q0-}"; _bcd_q0=""
+    _bcd_ml_query="$_bcd_ml_q0"
     _bcd_ml_table=0; _bcd_ml_full=0; _bcd_ml_flashrow=-1; _bcd_ml_cachenote=0
     # a menu open is its own freshness proof: never queue the toast here, and
     # KILL any armed toast-eraser/animator — their delayed ESC7/ESC8 save/
@@ -1988,9 +2015,12 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
     __bettercd_menu_stageA
     _bcd_ml_qsrc="$_bcd_ml_base"; __bettercd_qstk_reset
     __bettercd_menu_stageB   # sets rows/list/n and geometry
+    # a q0 open starts filtered ALREADY — arm the disk search here too, or a
+    # thin star-query would wait for the first keystroke to reach for zoxide+disk
+    __bettercd_stream_manage
 
     _bcd_ml_st="$(command stty -g </dev/tty 2>/dev/null)"
-    [ -n "$_bcd_ml_st" ] || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
+    [ -n "$_bcd_ml_st" ] || { __bettercd_delegate -; return $?; }
     command stty raw -echo </dev/tty 2>/dev/null
     printf '\033[?1003h\033[?1006h' >/dev/tty
     __bettercd_menu_draw
@@ -2085,6 +2115,19 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
                         fi ;;
                     '') # bare ESC: clears an active query first, else cancels
                         if [ -n "$_bcd_ml_query" ]; then
+                            # ESC clears the WHOLE query — the q0 floor included.
+                            # The user's `cd docs*` text stays untouched on the
+                            # command line above (it is scrollback now), so we
+                            # wipe only OUR painted appendage and move the query
+                            # echo onto the frame's ⌕ line — where it can keep
+                            # telling the truth about what is actually filtering.
+                            if [ -n "${_bcd_ml_q0-}" ]; then
+                                if [ "${_bcd_ml_realpark:-0}" = 1 ] && [ -n "${_bcd_ml_top:-}" ]; then
+                                    printf '\033[%d;%dH\033[K' \
+                                        "$(( _bcd_ml_top - 1 ))" "$_bcd_ml_qcol" >/dev/tty
+                                fi
+                                _bcd_ml_q0=""; _bcd_ml_pmode=fallback; _bcd_ml_realpark=0
+                            fi
                             _bcd_ml_query=""; _bcd_ml_extq=""; _bcd_ml_ext=""
                             __bettercd_menu_rebuild A
                         else
@@ -2101,7 +2144,8 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
                 # hover/⏎/click/Esc move & pick (handled above).
                 case "$_bcd_key" in
                     "$_bcd_ml_bs"|"$_bcd_ml_bs2")
-                        if [ -n "$_bcd_ml_query" ]; then
+                        # stops at the q0 floor (never eats the user's own word)
+                        if __bettercd_q_canpop; then
                             _bcd_ml_query="${_bcd_ml_query%?}"; _bcd_ml_backspaced=1; __bettercd_qback
                         fi ;;
                     G) _bcd_ml_sel=$((_bcd_ml_n - 1)); _bcd_ml_frame=$((_bcd_ml_frame + 1)) ;;
@@ -2282,7 +2326,7 @@ __bettercd_menu_loop() { # $1 = raw pool (real paths, OLDPWD first), $2 count (u
         if [ -n "$_bcd_ml_pick_override" ]; then _bcd_ml_pick="$_bcd_ml_pick_override"
         else _bcd_ml_pick="$(__bettercd_nthline "$_bcd_ml_list" "$_bcd_ml_sel")"; fi
         if [ -n "$_bcd_ml_pick" ]; then
-            __bettercd_delegate "$_bcd_ml_pick" && __bettercd_clear_miss
+            __bettercd_delegate "$_bcd_ml_pick"
             _bcd_ml_rc=$?
             printf '\033[2m✻ cd %s\033[0m\n' "$(__bettercd_home_rel "$_bcd_ml_pick")" >/dev/tty
             return "$_bcd_ml_rc"
@@ -2516,7 +2560,7 @@ __BCD_EOF__
 # Entry point: build the list (OLDPWD first + deduped recent, cap 10), or fall
 # back to a silent classic toggle when there's nothing worth a menu.
 __bettercd_magic_menu() { # $1 = "forced" when the user explicitly asked (cd --)
-    __bettercd_tty_ok || { __bettercd_delegate - && __bettercd_clear_miss; return $?; }
+    __bettercd_tty_ok || { __bettercd_delegate -; return $?; }
     __bettercd_seed_recent
     _bcd_mm_list="$(__bettercd_pool 200)"
     _bcd_mm_n=0
@@ -2533,7 +2577,7 @@ __BCD_EOF__
             return 1
         fi
     elif [ "$_bcd_mm_n" -le 1 ]; then        # auto mode, just OLDPWD/empty → classic
-        __bettercd_delegate - && __bettercd_clear_miss
+        __bettercd_delegate -
         return $?
     fi
     __bettercd_menu_loop "$_bcd_mm_list" "$_bcd_mm_n"
@@ -2585,12 +2629,165 @@ __BCD_EOF__
     return 0
 }
 
+# --- `cd name*` — the star opens the table, pre-filtered ----------------------
+# Strip EVERY trailing star off the typed word → the initial query (q0).
+__bettercd_star_strip() { # $1 word → sets _bcd_star_q
+    _bcd_star_q="$1"
+    while :; do
+        case "$_bcd_star_q" in
+            *'*') _bcd_star_q="${_bcd_star_q%'*'}" ;;
+            *) break ;;
+        esac
+    done
+}
+
+# zsh EXPANDS (or nomatch-ABORTS) an unquoted trailing star before cd() ever
+# runs, so `cd name*` cannot simply be read off "$1" there. The star word is
+# therefore recognised at Enter-time, straight off the command line — see the
+# zle-line-finish hook below. This is the shared SHAPE test: is this buffer
+# exactly `cd <one-bare-token-ending-in-*>`? CONSERVATIVE on purpose — no second
+# word, no quoting, no expansion, no other glob metachar, no flag, never a bare
+# `cd *` — because everything it accepts gets its glob semantics changed, and
+# the user's typed line must keep meaning what it says. Pure + FORK-FREE: sets
+# _bcd_star_word (the query, star stripped); rc0 = this IS a star-cd line.
+__bettercd_star_parse() { # $1 buffer → sets _bcd_star_word
+    _bcd_star_word=""
+    case "$1" in
+        'cd '*) ;;
+        *) return 1 ;;
+    esac
+    _bcd_sp_a="${1#cd }"
+    case "$_bcd_sp_a" in
+        *'*') ;;                                  # must END in a star
+        *) return 1 ;;
+    esac
+    case "$_bcd_sp_a" in                          # nothing tricky inside
+        *' '*|*"$_BETTERCD_TAB"*|*"'"*|*'"'*|*'`'*|*'$'*|*"$_BETTERCD_BSL"*|*'?'*|*'['*|*']'*|-*)
+            return 1 ;;
+    esac
+    _bcd_sp_b="${_bcd_sp_a%'*'}"
+    case "$_bcd_sp_b" in
+        ''|*'*'*) return 1 ;;                     # bare `cd *`, or a star mid-word
+    esac
+    _bcd_star_word="$_bcd_sp_b"
+    return 0
+}
+
+# --- S4: the unvisited-dir jump ----------------------------------------------
+# zoxide only knows where you have BEEN. A directory that exists but was never
+# visited is invisible to it (`zoxide query <name>` → no match), so `cd <name>`
+# used to sail past a perfectly real dir and offer to CREATE one. This resolves
+# the name against real disk instead — cwd subtree first (what you are working
+# on), then $HOME — and teaches zoxide the answer, so it only ever runs once.
+# Runs ONLY on a miss, on an interactive tty: the happy path never pays a thing.
+
+# ONE bounded scan per root — never one per tier. The tiers (exact → prefix →
+# contains) are then decided IN-SHELL over the candidates, fork-free. Six finds
+# (three tiers x two roots) measured 38s of dead shell on a total miss, which is
+# not a thing an interactive cd is allowed to do; one pass costs a single walk.
+# cwd goes 5 deep (a project); $HOME only 3 (a home is not a project).
+__bettercd_jump_scan() { # $1 root, $2 name, $3 scope → sets _bcd_js_out
+    # the profile follows the ROOT, not the caller: standing IN $HOME must not
+    # get the deep project scan (that walks ~/Library — measured 12.8s of dead
+    # shell). Anything rooted at $HOME is a home sweep: shallower, heavier prunes.
+    if [ "$3" = home ] || [ "$1" = "$HOME" ]; then
+        _bcd_js_out="$(command find "$1" -maxdepth 3 \
+            \( -name .git -o -name node_modules -o -name .cache -o -name .venv \
+               -o -name __pycache__ -o -name Library -o -name .Trash \
+               -o -name Applications \) -prune \
+            -o -maxdepth 3 -type d -iname "*$2*" -print 2>/dev/null | head -200)"
+    else
+        _bcd_js_out="$(command find "$1" -maxdepth 5 \
+            \( -name .git -o -name node_modules -o -name .cache -o -name .venv \
+               -o -name __pycache__ \) -prune \
+            -o -maxdepth 5 -type d -iname "*$2*" -print 2>/dev/null | head -200)"
+    fi
+    [ -n "$_bcd_js_out" ]
+}
+
+# Rank the candidates: an exact basename always beats a prefix, a prefix always
+# beats a substring; inside a tier the SHALLOWEST wins (fewest slashes; ties →
+# the first find emitted). Pure string work — no forks, no sort. Sets _bcd_jp.
+__bettercd_jump_classify() { # $1 name (over $_bcd_js_out) → rc0 + _bcd_jp
+    _bcd_jp=""; _bcd_jc_bt=9; _bcd_jc_bd=-1
+    __bettercd_lc "$1"; _bcd_jc_q="$_bcd_lc"
+    while IFS= read -r _bcd_jc_l; do
+        [ -n "$_bcd_jc_l" ] || continue
+        [ "$_bcd_jc_l" = "$PWD" ] && continue
+        [ -d "$_bcd_jc_l" ] || continue
+        _bcd_jc_b="${_bcd_jc_l##*/}"
+        __bettercd_lc "$_bcd_jc_b"; _bcd_jc_lb="$_bcd_lc"
+        if [ "$_bcd_jc_lb" = "$_bcd_jc_q" ]; then _bcd_jc_t=0
+        else
+            case "$_bcd_jc_lb" in
+                "$_bcd_jc_q"*) _bcd_jc_t=1 ;;
+                *)             _bcd_jc_t=2 ;;
+            esac
+        fi
+        _bcd_jc_d=0; _bcd_jc_r="$_bcd_jc_l"      # depth = slash count
+        while [ -n "$_bcd_jc_r" ]; do
+            case "$_bcd_jc_r" in
+                */*) _bcd_jc_r="${_bcd_jc_r#*/}"; _bcd_jc_d=$((_bcd_jc_d + 1)) ;;
+                *) break ;;
+            esac
+        done
+        if [ "$_bcd_jc_t" -lt "$_bcd_jc_bt" ] \
+           || { [ "$_bcd_jc_t" -eq "$_bcd_jc_bt" ] && [ "$_bcd_jc_d" -lt "$_bcd_jc_bd" ]; }; then
+            _bcd_jc_bt="$_bcd_jc_t"; _bcd_jc_bd="$_bcd_jc_d"; _bcd_jp="$_bcd_jc_l"
+        fi
+    done <<__BCD_EOF__
+$_bcd_js_out
+__BCD_EOF__
+    [ -n "$_bcd_jp" ]
+}
+
+# The resolver: the cwd subtree first (the user is working HERE), then $HOME as a
+# fallback — one scan each, the first root with a hit wins. Sets _bcd_jp.
+__bettercd_jump_resolve() { # $1 name → rc0 + _bcd_jp
+    case "$PWD" in /) return 1 ;; esac      # never sweep the whole filesystem
+    if __bettercd_jump_scan "$PWD" "$1" cwd && __bettercd_jump_classify "$1"; then
+        return 0
+    fi
+    [ "${#1}" -ge 3 ] || return 1          # too little signal for a $HOME sweep
+    [ "$PWD" != "$HOME" ] || return 1
+    if __bettercd_jump_scan "$HOME" "$1" home && __bettercd_jump_classify "$1"; then
+        return 0
+    fi
+    return 1
+}
+
+# Is this arg eligible for the jump? Bare relative NAME only: a slash means the
+# user already knows the layout (keep those on the classic path), and flags /
+# dashes / absolutes never reach here as names.
+__bettercd_jump_eligible() { # $1 arg → rc0 if searchable
+    [ "${BETTERCD_JUMP-1}" != 0 ] || return 1
+    case "$1" in
+        ''|.|..|/*|-*|+*|*/*) return 1 ;;
+    esac
+    return 0
+}
+
 # --- the cd wrapper ----------------------------------------------------------
 cd() {
     # zero-fork freshness check; on reload, re-dispatch into the NEW cd
     if __bettercd_interactive && __bettercd_reload_check; then
         cd "$@"
         return $?
+    fi
+    # `cd name*` (zsh): the Enter-time hook stashed the star word off the REAL
+    # command line, so whatever the glob did — expanded to one dir, to twenty, or
+    # to nothing — is irrelevant: the star meant "open the table". Consumed here
+    # (single-use), and only ever set for the exact `cd <word>*` shape.
+    if [ -n "${_BETTERCD_STAR_Q-}" ]; then
+        _bcd_q0="$_BETTERCD_STAR_Q"; _BETTERCD_STAR_Q=""
+        if __bettercd_interactive && __bettercd_tty_ok; then
+            _bcd_invoke="cd $_bcd_q0*"      # the literal text the user typed
+            __bettercd_magic_menu forced
+            _bcd_star_rc=$?
+            _bcd_q0=""
+            return "$_bcd_star_rc"
+        fi
+        _bcd_q0=""
     fi
     # fast passthroughs: no args, multiple args, flags, "-", dir-stack refs
     if [ "$#" -ne 1 ]; then
@@ -2607,15 +2804,15 @@ cd() {
             -*|+*)
                 # `cd -P dir` etc: flags mean BUILTIN semantics — the zoxide
                 # delegate chokes on them (upstream zoxide does too)
-                __bettercd_cd "$@" && __bettercd_clear_miss
+                __bettercd_cd "$@"
                 return $? ;;
         esac
-        __bettercd_delegate "$@" && __bettercd_clear_miss
+        __bettercd_delegate "$@"
         return $?
     fi
     case "$1" in
         '' )
-            __bettercd_delegate "$@" && __bettercd_clear_miss
+            __bettercd_delegate "$@"
             return $? ;;
         - )
             # no OLDPWD yet: the builtin would leak "__bettercd_cd:cd: string
@@ -2649,7 +2846,7 @@ cd() {
                         fi
                     fi ;;
             esac
-            __bettercd_delegate "$@" && __bettercd_clear_miss
+            __bettercd_delegate "$@"
             return $? ;;
         --help | -h )
             __bettercd_help
@@ -2684,17 +2881,17 @@ cd() {
                 __bettercd_njump "${#1}"
                 return $?
             fi
-            __bettercd_delegate "$@" && __bettercd_clear_miss
+            __bettercd_delegate "$@"
             return $? ;;
         ... | ....* )
             # dot-runs WITH a space (the aliases only catch cd..): cd ... = up 2
             case "$1" in *[!.]*) ;; *)
                 _bcd_dots=${#1}; _bcd_dt=".."
                 while [ "$_bcd_dots" -gt 2 ]; do _bcd_dt="$_bcd_dt/.."; _bcd_dots=$((_bcd_dots - 1)); done
-                __bettercd_delegate "$_bcd_dt" && __bettercd_clear_miss
+                __bettercd_delegate "$_bcd_dt"
                 return $?
             esac
-            __bettercd_delegate "$@" && __bettercd_clear_miss
+            __bettercd_delegate "$@"
             return $? ;;
         -* | +* )
             # flags (-P/-L/-e/…) and zsh dir-stack refs (+2/-2): builtin
@@ -2705,7 +2902,6 @@ cd() {
             if __bettercd_interactive && [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
                 _bcd_fe="${TMPDIR:-/tmp}/.bcd_fe.$$"
                 if __bettercd_cd "$@" 2>"$_bcd_fe"; then
-                    __bettercd_clear_miss
                     command rm -f "$_bcd_fe" 2>/dev/null
                     return 0
                 fi
@@ -2725,8 +2921,28 @@ cd() {
                 printf '\033[38;5;213m✻\033[0m \033[1;36m%s\033[0m \033[2m— %s\033[0m\n' "$*" "$_bcd_fmsg" >&2
                 return "$_bcd_frc"
             fi
-            __bettercd_cd "$@" && __bettercd_clear_miss
+            __bettercd_cd "$@"
             return $? ;;
+    esac
+
+    # trailing star = EXPLICIT menu intent: open the same places table as bare
+    # `cd`, pre-filtered with the typed word already in the query. Deliberately
+    # EARLY — ahead of the -d happy path — so the star always means "the table",
+    # never "enter the dir". Cost: on an interactive tty a literal directory
+    # named `foo*` is unreachable via `cd foo*` (use `cd ./foo*/` or a quoted
+    # `builtin cd`); sacrificed knowingly. Scripts / non-tty fall straight
+    # through and keep TODAY'S behavior byte for byte.
+    case "$1" in
+        *'*')
+            if __bettercd_interactive && __bettercd_tty_ok; then
+                __bettercd_star_strip "$1"
+                _bcd_q0="$_bcd_star_q"       # the pre-typed query
+                _bcd_invoke="cd $1"          # FULL literal text (park math)
+                __bettercd_magic_menu forced
+                _bcd_star_rc=$?
+                _bcd_q0=""
+                return "$_bcd_star_rc"
+            fi ;;
     esac
 
     # happy path: the directory exists — zero-overhead passthrough
@@ -2738,7 +2954,7 @@ cd() {
             printf '\033[38;5;213m✻\033[0m \033[2mcan'"'"'t enter\033[0m \033[1;36m%s\033[0m \033[2m— permission denied\033[0m\n' "$1" >&2
             return 1
         fi
-        __bettercd_delegate "$1" && __bettercd_clear_miss
+        __bettercd_delegate "$1"
         return $?
     fi
 
@@ -2746,7 +2962,7 @@ cd() {
     if [ -e "$1" ] && [ ! -d "$1" ]; then
         _bcd_parent="$(dirname -- "$1")"
         printf 'bettercd: %s is a file → cd %s\n' "$1" "$_bcd_parent" >&2
-        __bettercd_delegate "$_bcd_parent" && __bettercd_clear_miss
+        __bettercd_delegate "$_bcd_parent"
         return $?
     fi
 
@@ -2772,7 +2988,7 @@ cd() {
                     _bcd_eres="$(dirname -- "$_bcd_ep")"
                 fi
                 printf 'bettercd: %s → cd %s\n' "$1" "$_bcd_eres" >&2
-                __bettercd_delegate "$_bcd_eres" && __bettercd_clear_miss
+                __bettercd_delegate "$_bcd_eres"
                 return $?
             fi ;;
     esac
@@ -2786,8 +3002,34 @@ cd() {
     # let the user's own cd try first (zoxide fuzzy jump, CDPATH, custom fn)
     if [ -z "$_bcd_force_create" ]; then
         if __bettercd_delegate "$1" 2>/dev/null; then
-            __bettercd_clear_miss
             return 0
+        fi
+    fi
+
+    # S4 — the UNVISITED-DIR JUMP. zoxide has already had its say (the delegate
+    # above); it can only know places you have BEEN. So before we start talking
+    # about CREATING a directory, look for one that already exists: the cwd
+    # subtree first (exact → prefix → contains), then $HOME. A hit is a jump, not
+    # a create — and we teach zoxide the path, so this search never runs for it
+    # again. Interactive tty only (scripts keep today's flow byte for byte),
+    # never for `name/` (explicit create intent) or a path with a slash, and
+    # BETTERCD_JUMP=0 turns it off.
+    if [ -z "$_bcd_force_create" ] && __bettercd_jump_eligible "$1" \
+       && __bettercd_interactive && __bettercd_tty_ok; then
+        if __bettercd_jump_resolve "$1"; then
+            if [ -t 2 ] && [ -z "${NO_COLOR-}" ] && [ "${TERM-}" != dumb ]; then
+                printf '\033[38;5;213m✻\033[0m \033[2m↪\033[0m \033[1;36m%s\033[0m\n' \
+                    "$(__bettercd_home_rel "$_bcd_jp")" >&2
+            else
+                printf 'bettercd: → %s\n' "$_bcd_jp" >&2
+            fi
+            if __bettercd_delegate "$_bcd_jp"; then
+                # self-improving: zoxide now KNOWS this place, so the next
+                # `cd <name>` is an instant frecency jump, never a scan
+                command -v zoxide >/dev/null 2>&1 && command zoxide add "$_bcd_jp" 2>/dev/null
+                return 0
+            fi
+            return 1
         fi
     fi
 
@@ -2816,22 +3058,23 @@ cd() {
             return $? ;;
     esac
 
-    # outside the current directory → fail once with a hint; on an immediate
-    # identical retry, ask for confirmation (interactive shells only)
-    if [ "$_BETTERCD_LAST_MISS" = "$_bcd_norm" ] && __bettercd_interactive; then
+    # outside the current directory → say it's missing AND ask to create it in
+    # the same breath (one line, one keystroke; interactive shells only —
+    # scripts and BETTERCD_QUIET=1 keep the stock error with no prompt)
+    if __bettercd_interactive && [ "${BETTERCD_QUIET-0}" != 1 ]; then
         if __bettercd_tty_ok; then
-            printf '\033[38;5;213m✻\033[0m \033[2mcreate\033[0m \033[1;36m%s\033[0m \033[2m?\033[0m \033[1m[y/N]\033[0m ' \
+            printf '\033[38;5;213m✻\033[0m \033[1;36m%s\033[0m \033[2mdoesn'"'"'t exist — outside your current dir · create it?\033[0m \033[1m[y/N]\033[0m ' \
                 "$(__bettercd_home_rel "$_bcd_norm")" >&2
         else
-            printf 'bettercd: create %s ? [y/N] ' "$_bcd_norm" >&2
+            printf 'bettercd: %s does not exist (outside the current dir) — create it? [y/N] ' "$_bcd_norm" >&2
         fi
+        _bcd_ans=""
         read -r _bcd_ans
         case "$_bcd_ans" in
             y|Y|yes|YES)
                 __bettercd_create_and_cd "$_bcd_norm"
                 return $? ;;
             *)
-                __bettercd_clear_miss
                 if __bettercd_tty_ok; then
                     printf '\033[38;5;213m✻\033[0m \033[2mnot created\033[0m\n' >&2
                 else
@@ -2840,17 +3083,7 @@ cd() {
                 return 1 ;;
         esac
     fi
-    _BETTERCD_LAST_MISS="$_bcd_norm"
-    if __bettercd_interactive && [ "${BETTERCD_QUIET-0}" != 1 ] && __bettercd_tty_ok; then
-        # one in-brand line instead of the raw two-line error
-        printf '\033[38;5;213m✻\033[0m \033[1;36m%s\033[0m \033[2mdoesn'"'"'t exist — outside your current dir · repeat to create it\033[0m\n' \
-            "$(__bettercd_home_rel "$_bcd_norm")" >&2
-    else
-        printf 'cd: no such file or directory: %s\n' "$1" >&2
-        if __bettercd_interactive && [ "${BETTERCD_QUIET-0}" != 1 ]; then
-            printf 'bettercd: outside the current dir — repeat the command to create it.\n' >&2
-        fi
-    fi
+    printf 'cd: no such file or directory: %s\n' "$1" >&2
     return 1
 }
 
@@ -2877,8 +3110,25 @@ if [ -n "${ZSH_VERSION-}" ]; then
     fi
     __bettercd_zlf() {
         (( ${+functions[__bettercd_prev_zlf]} )) && __bettercd_prev_zlf "$@"
+        # cd name* : STASH the star word, straight off the line the user typed.
+        # BUFFER is never touched — the sacred rule: a rewrite here (escaping the
+        # star) DOES repaint the accepted line, so the user would watch their
+        # words change into cd name\* . Instead the word is remembered and cd()
+        # routes on it, ignoring whatever the glob expanded to. NOMATCH is lifted
+        # for this ONE command (restored at the next precmd) so the no-match case
+        # reaches cd() at all instead of aborting the line. Cleared FIRST, every
+        # line, so a stash can never leak into a later plain cd.
+        # (NB: this whole block lives inside eval "..." — no single quotes here.)
+        _BETTERCD_STAR_Q=""
+        if [[ $BUFFER == "cd "*"*" ]] && __bettercd_star_parse "$BUFFER"; then
+            _BETTERCD_STAR_Q="$_bcd_star_word"
+            if [[ -o nomatch ]]; then
+                _BETTERCD_STAR_NOMATCH=1
+                unsetopt nomatch
+            fi
+        fi
         case $BUFFER in
-            "cd -"*)
+            "cd"|"cd -"*|"cd "*"*")
                 local _rep="" _ch=""
                 printf "\033[6n" > /dev/tty
                 while read -s -t 0.2 -k 1 _ch < /dev/tty; do
@@ -3003,6 +3253,7 @@ __bettercd_help() {
         "cd app.py:42:7"    "pasted stack-trace paths just work (→ the file's dir)" \
         "cd.."              "the no-space classic — cd.. cd... cd.... all real" \
         "cd"                "just cd: the ✻ places table (scripts still go home)" \
+        "cd docs*"          "same table, pre-filtered on 'docs' — keep typing to narrow" \
         "cd -"              "toggle · cd -- = 2 back · cd --- = 3 back · ↶ cycles" \
         "undo-cd"           "go back + remove exactly what was created (rmdir-only)"
     printf "\n  ${_bh_S}THE DROPDOWN${_bh_R}  ${_bh_D}(just cd · your places: live + zoxide + replayed history)${_bh_R}\n"

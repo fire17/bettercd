@@ -28,10 +28,7 @@ $ cd proj                       # exists in your zoxide history
 /home/you/projects/newapp       # fuzzy jump, exactly like before
 
 $ cd /etc/nope                  # outside your cwd — never silently created
-cd: no such file or directory: /etc/nope
-bettercd: outside the current dir — repeat the command to create it.
-$ cd /etc/nope                  # you meant it? ok, ask first:
-bettercd: create /etc/nope ? [y/N]
+✻ /etc/nope doesn't exist — outside your current dir · create it? [y/N]
 ```
 
 ## The sparkle line
@@ -52,7 +49,7 @@ flowchart LR
     B -->|"yes"| C["plain cd<br/><i>zoxide-aware, ~25µs</i>"]
     B -->|"no, zoxide knows it"| D["fuzzy jump wins"]
     B -->|"no, under cwd"| E["mkdir -p + cd<br/>✻ sparkle announce + undo-cd"]
-    B -->|"no, outside cwd"| F["fail once with hint<br/>retry → y/N prompt"]
+    B -->|"no, outside cwd"| F["one line: doesn't exist<br/>+ create it? y/N"]
     style A fill:#1a1030,stroke:#e8b84a,color:#f5d67b
     style C fill:#101a2e,stroke:#2ea44f,color:#7ee2a8
     style E fill:#1a1030,stroke:#e8b84a,color:#f5d67b
@@ -66,7 +63,7 @@ flowchart LR
 - **`undo-cd`** (or `bettercd undo`) — go back where you were and remove *exactly* the directories that were created (uses `rmdir` only: anything that gained content is kept, never deleted).
 - **Typo guard before it makes junk.** `cd sr` when `src/` sits right there doesn't mkdir `sr` — it asks **`did you mean src/ ?`** first (`[Y=jump / c=create / n=abort]`). Matches are case-folds, unique prefixes, and single edits (add/drop/swap/transpose a char). Interactive only — scripts still auto-create exactly as before (CI-safe). Disable with `BETTERCD_TYPO_GUARD=0`.
 - **Editor / stack-trace paste just works.** `cd src/app.py:42` or `cd src/app.py:42:7` (the shape your traceback and `file:line:col` copies come in) strips the `:line[:col]` and drops you in the file's directory — no "no such file or directory".
-- **Outside your cwd → never silently created.** First attempt fails with a hint; an immediate identical retry asks `[y/N]`. Scripts and non-interactive shells never get prompts and never get surprise directories.
+- **Outside your cwd → never silently created.** One line tells you it doesn't exist *and* asks `[y/N]` — no retyping the command. Scripts and non-interactive shells never get prompts and never get surprise directories.
 - **Composes with [zoxide](https://github.com/ajeetdsouza/zoxide), never fights it.** If your `cd` is zoxide-powered (`zoxide init --cmd cd`), fuzzy jumps still win for bare names. A **trailing slash forces creation**: `cd newdir/` means "make it *here*", skipping the fuzzy match.
 - **`cd some/file.txt` → jumps to the file's parent directory** instead of erroring.
 - **`bettercd doctor`** — checks zoxide is installed and working, whether it owns `cd`, whether fuzzy interactive search (fzf) is available, and that bettercd is loaded in the right order. `--fix` backs up your setup first, then offers to install what's missing.
@@ -74,6 +71,12 @@ flowchart LR
 - **`cd --` — a ✻ dropdown workbench of recent places.** A scrolling, mouse-aware menu of where you've been, with a live row model that stays blazingly fast (every git/tag/mtime fact is computed only for rows you actually look at, once, then cached; the key loop is fork-free). First open seeds a backlog of where you've been *before* bettercd, **merging** zoxide's db (highest recency confidence) with a real **history replay** — a single `awk` pass that *simulates* `cd` across your shell history so even relative moves (`cd /base` → `cd sub` → `cd ..`) resolve to real dirs, with a constraint join for lone `cd <name>`s and a `[ -d ]` truth filter on everything. `cd -` stays exactly classic by default — opt in to auto-magic (`bettercd magic on`: second `cd -` within a minute opens the dropdown for a refreshing 5-min window). `builtin cd -` is always the pure classic toggle.
 
   **Keys:** `↑↓`/`jk` move · wheel glides · hover selects · `⏎`/click cd · `1`–`9` pick · `g`/`G` top/bottom · **`p` pin** (floats to top, persists to `~/.config/bettercd/pins`) · **`t` mark project** (`.project/`) · **`v` table view** (name · modified · version · shipped) · **`r` sort** (recent → name → modified) · **`l` preset** (all → projects → git → pinned) · **`/` or just type = fuzzy find** · `u` parent · `.` full/home paths · `o` reveal in Finder · `?` help · `esc`/`q` cancel. Rows are colored by git state — green `●` clean, yellow `◐` modified, orange `○` untracked (untracked wins) — projects render bold with `▪`, pins get `⚑`. Fuzzy find that stays thin extends via zoxide + a bounded `find "$HOME"` on a typing pause (dim `+` rows).
+- **`cd docs*` — the same table, already filtered.** A trailing star means *"show me the places that look like this"*: the dropdown opens with `docs` **pre-typed as the query**, ranked the way you'd want it — zoxide's own list first, then fuzzy hits from the **current tree**, then everywhere else — all streaming in as it finds them. Keep typing to narrow; **Backspace stops at the word you typed** (`docs` is yours, the menu never eats it); `esc` clears the whole query, `esc` again cancels.
+
+  **On zsh it works even when the glob would match** (`cd bett*` in a dir that *has* `bettercd/`): at Enter-time bettercd reads the star word straight off your command line — **your line is never rewritten**, and the `*` never becomes a visible `\*` — then routes to the table no matter what the glob expanded to. `NOMATCH` is lifted for that one command (restored at the next prompt) so the no-match case reaches the table too, and *only* the exact shape `cd <one-bare-word>*` is ever touched — anything quoted, flagged, multi-word, or carrying another glob char (`cd ~/p*/src`, `cd 'a*'`, `cd a?*`) keeps stock zsh globbing, untouched.
+  **On bash** an unmatched `cd zzz*` reaches the table the same way, but a glob that *does* match is expanded by bash before `cd` ever sees it — so `cd bett*` there just cds (one match) or errors with too many arguments (several). Quote it — `cd 'bett*'` — to force the table.
+  On an interactive tty this means a directory literally *named* `foo*` can't be reached with `cd foo*` anymore (use `cd ./foo*/`). Scripts and non-tty shells are untouched: no menu, no routing change, stock behavior byte for byte.
+- **`cd apiv2` finds the dir you've never visited.** zoxide only knows where you have *been* — a directory that exists but was never entered is invisible to it, so `cd apiv2` used to sail straight past `./src/services/apiv2` and offer to *create* `./apiv2`. Now a miss searches real disk first: **the cwd subtree, then `$HOME`** — exact basename beats a prefix beats a substring, shallowest wins — jumps you there with a `✻ ↪ ~/proj/src/services/apiv2` note, and **teaches zoxide the path**, so the next `cd apiv2` is an instant frecency jump and never scans again. Bounded and only ever on a miss (the happy path is untouched): one pruned `find` per root, cwd 5 deep, `$HOME` 3 deep. Measured on a 34 020-dir tree: hit **173 ms**, worst-case total miss **474 ms**. `cd apiv2/` (trailing slash) still force-creates, skipping the search; `BETTERCD_JUMP=0` turns it off; scripts keep the old flow exactly.
 - **`bettercd places`** — see the whole recent-places pool, numbered and home-relative, with a source tag (live / zoxide / history). `bettercd places -n <k>` limits the count.
 - **Vanished dirs get a real answer.** `cd -` back to a dir that was renamed/moved? bettercd remembers inodes, finds it, tells you — `✻ test is now test2 — taking you there` — and goes. Actually deleted: a clean `does not exist there anymore (deleted or moved away)` instead of a raw shell error.
 - **`cd..` just works** — the classic no-space typo: `cd..` → `cd ..`, `cd...` → `cd ../..`, up to `cd.....`. (`BETTERCD_CD_TYPOS=0` to disable.)
@@ -120,15 +123,17 @@ Auto-creating directories on `cd` is a footgun if done naively. The rules that k
 | Missing, **close to a sibling dir** (interactive) | `did you mean src/ ?` before mkdir — jump / create / abort |
 | Missing, ends in `:line[:col]` and the stripped path exists | editor/stack-trace paste → cd to the file's dir |
 | Missing, bare name with a zoxide match | **fuzzy jump wins** (no typo-mkdir shadowing your history) |
-| Missing, **outside cwd** | fail once with hint → identical retry prompts `[y/N]` |
+| Missing, **outside cwd** | one line states it's missing and asks `[y/N]` (never silent) |
 | `..` tricks (`cd a/../../etc`) | normalized *first* — a path that escapes cwd is treated as outside |
 | `cd -` twice / `cd --` (interactive) | sparkling dropdown of recent places; plain Enter === classic `cd -` |
+| Missing, but a **real dir of that name exists** (cwd subtree, then `$HOME`) | **jump there** (`✻ ↪ path`) + teach zoxide — instead of creating a new one |
+| `cd name*` (interactive) | the places table, pre-filtered on `name` — zoxide hits, then the current tree, then everywhere (zsh: even when the glob matches; bash: only when it doesn't self-resolve) |
 | Non-interactive shell / script | no prompts, no auto-create surprises outside cwd; `cd -` is the plain classic toggle |
 | Undo | `rmdir` only — never `rm`; non-empty dirs are kept and reported |
 | Undo + zoxide | the created dir is also removed from the zoxide database |
 | Your old `cd` | detected at load (zoxide / custom function / builtin) and delegated to — never clobbered |
 
-Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_QUIET=1` (no hints), `BETTERCD_TYPO_GUARD=0` (no did-you-mean), `BETTERCD_SPARKLE=0` (no animation), `BETTERCD_MAGIC=0` (no `cd -` dropdown), `builtin cd` / `command cd` (bypass entirely).
+Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_JUMP=0` (no unvisited-dir search), `BETTERCD_QUIET=1` (no hints), `BETTERCD_TYPO_GUARD=0` (no did-you-mean), `BETTERCD_SPARKLE=0` (no animation), `BETTERCD_MAGIC=0` (no `cd -` dropdown), `builtin cd` / `command cd` (bypass entirely).
 
 ## Performance
 
@@ -144,6 +149,9 @@ wrapper: 36.9µs per cd   builtin: 11.7µs per cd   overhead: ~25µs
 
 ```
 cd <dir>              everything above
+cd                    the ✻ places table (scripts still go home)
+cd <name>*            the same table, pre-filtered on <name> (backspace floors there)
+cd <unvisited-name>   searches cwd subtree then $HOME, jumps, teaches zoxide (✻ ↪)
 cd -  (twice)         sparkling dropdown of recent places (cd -- forces it)
   in the dropdown:    p pin · t mark project · v table · r sort · l preset
                       / (or type) fuzzy find · u parent · . paths · o reveal · ? help

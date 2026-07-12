@@ -1,5 +1,6 @@
 #!/bin/sh
-# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC1091,SC2181,SC2217,SC2034,SC3044,SC2154,SC2088,SC3045
+# shellcheck disable=SC2164,SC2319,SC2103,SC1090,SC1091,SC2181,SC2217,SC2034,SC3044,SC2154,SC2088,SC3045,SC2016
+#   SC2016: the star-rewrite fixtures are LITERAL buffers (cd $x*), never expansions.
 #   cd failing, inspecting $? after it, and feeding its [y/N] prompt via stdin
 #   are exactly what this suite tests. SC2154: _bcd_dash_mode is set by the
 #   sourced bettercd.sh. SC2088: the ~ in a home-rel expectation is a literal
@@ -75,31 +76,34 @@ rc=$?
 [ $rc -ne 0 ] && [ ! -d "$TMP/zzz" ] && [ "$PWD" = "$TMP/sub" ]
 check "dot-dot escape is not auto-created" $?
 
-# 9. out-of-base: second identical attempt + y creates (forced interactive)
+# 9. out-of-base: FIRST attempt asks; y creates (forced interactive)
 _BETTERCD_FORCE_INTERACTIVE=1
 target="$TMP/outside/deep"
-cd "$target" 2>/dev/null   # first miss
 cd "$target" 2>/dev/null <<'EOF'
 y
 EOF
-[ "$PWD" = "$target" ] && [ -d "$target" ]; check "out-of-base double attempt + y creates" $?
+[ "$PWD" = "$target" ] && [ -d "$target" ]; check "out-of-base first attempt + y creates" $?
 bettercd undo 2>/dev/null
 cd "$TMP/sub" 2>/dev/null
 
-# 10. out-of-base: second attempt + n does NOT create
+# 10. out-of-base: n does NOT create
 target2="$TMP/outside2/deep"
-cd "$target2" 2>/dev/null
 cd "$target2" 2>/dev/null <<'EOF'
 n
 EOF
-[ $? -ne 0 ] && [ ! -d "$target2" ]; check "out-of-base double attempt + n refuses" $?
+[ $? -ne 0 ] && [ ! -d "$target2" ]; check "out-of-base prompt + n refuses" $?
+
+# 10b. the prompt line says BOTH: missing + the [y/N] ask (one breath)
+msg=$(cd "$TMP/outside2b" 2>&1 </dev/null)
+case "$msg" in *"does not exist"*"[y/N]"*) rc=0 ;; *) rc=1 ;; esac
+[ $rc -eq 0 ] && [ ! -d "$TMP/outside2b" ]; check "one-step prompt states missing + asks" $?
 unset _BETTERCD_FORCE_INTERACTIVE
 
-# 11. non-interactive: no prompt, no hang, no create on repeat
+# 11. non-interactive: no prompt, no hang, no create — ever
 target3="$TMP/outside3/deep"
-cd "$target3" 2>/dev/null
 cd "$target3" 2>/dev/null </dev/null
-[ $? -ne 0 ] && [ ! -d "$target3" ]; check "non-interactive repeat stays safe" $?
+cd "$target3" 2>/dev/null </dev/null
+[ $? -ne 0 ] && [ ! -d "$target3" ]; check "non-interactive miss stays safe" $?
 
 # 12. trailing slash creates
 cd "$TMP" 2>/dev/null
@@ -843,6 +847,164 @@ $TMP/tt/C
     [ "$PWD" = "$HOME" ]; check "non-interactive bare cd keeps home" $?
     cd "$TMP"
 fi
+
+# 34. `cd name*` — the trailing star opens the table, pre-filtered -------------
+cd "$TMP"
+
+# 34a. star strip → the initial query (q0)
+__bettercd_star_strip 'docs*';  [ "$_bcd_star_q" = docs ]; check "star: strips the trailing star" $?
+__bettercd_star_strip 'docs**'; [ "$_bcd_star_q" = docs ]; check "star: strips every trailing star" $?
+__bettercd_star_strip 'docs';   [ "$_bcd_star_q" = docs ]; check "star: starless word is unchanged" $?
+__bettercd_star_strip '*';      [ -z "$_bcd_star_q" ];     check "star: a bare star strips to empty" $?
+
+# 34b. the Enter-time SHAPE test (pure fn; rc0 = this is a star-cd line, and
+# _bcd_star_word is the query). It decides which command lines get their glob
+# semantics changed, so it must accept ONLY the exact
+# `cd <one-bare-token-ending-in-*>` shape and stay silent on everything else.
+__bettercd_star_parse 'cd docs*'; rc=$?
+[ $rc -eq 0 ] && [ "$_bcd_star_word" = docs ]; check "star-parse: accepts cd docs* → query 'docs'" $?
+__bettercd_star_parse 'cd ~/Creations/bett*'; rc=$?
+[ $rc -eq 0 ] && [ "$_bcd_star_word" = '~/Creations/bett' ]; check "star-parse: a path token is accepted whole" $?
+for buf in 'cd docs' 'ls docs*' 'cd a b*' 'cd *' 'cd a*b*' 'cd -P d*' 'cd $x*' 'cd "a*"' "cd 'a*'" 'cd a?*' 'cd a[1]*' 'cdx*' 'echo cd docs*' 'cd bett* && ls'; do
+    if __bettercd_star_parse "$buf"; then
+        bad "star-parse: must NOT claim [$buf]"
+    elif [ -z "$_bcd_star_word" ]; then ok
+    else bad "star-parse: a rejected buffer must leave no query [$buf]"; fi
+done
+
+# 34c. the q0 FLOOR: backspace pops our painted additions, never the user's word
+_bcd_ml_q0="bett"; _bcd_ml_query="bett"
+if __bettercd_q_canpop; then bad "star: backspace must stop AT the q0 floor"; else ok; fi
+_bcd_ml_query="bette"
+__bettercd_q_canpop; check "star: backspace pops an addition above the floor" $?
+_bcd_ml_q0=""; _bcd_ml_query="x"
+__bettercd_q_canpop; check "star: no q0 → the floor is empty (classic behavior)" $?
+
+# 34d. a q0 open filters immediately, and qback stops at the floor (live fixture)
+mkdir -p "$TMP/pwd_here" "$TMP/bettercd" "$TMP/betting" "$TMP/mango"
+_bcd_ml_pool="$TMP/bettercd
+$TMP/betting
+$TMP/mango"
+_BETTERCD_PINS=""; _bcd_ml_sort=recent; _bcd_ml_preset=all; _bcd_ml_ext=""; _bcd_ml_full=1
+_bcd_ml_sel=0; _bcd_ml_off=0
+cd "$TMP/pwd_here"; __bettercd_menu_stageA
+_bcd_ml_q0="bett"; _bcd_ml_query="bett"
+_bcd_ml_qsrc="$_bcd_ml_base"; __bettercd_qstk_reset; __bettercd_menu_stageB
+qn_q0="$_bcd_ml_n"; ql_q0="$_bcd_ml_list"
+[ "$qn_q0" -eq 2 ]; check "star: the list opens ALREADY filtered by q0" $?
+case "$_bcd_ml_list" in *mango*) bad "star: q0 filters non-matches out" ;; *) ok ;; esac
+_bcd_ml_query="betterc"; __bettercd_qfwd
+[ "$_bcd_ml_n" -eq 1 ]; check "star: typing on narrows below q0" $?
+# pop back down to the floor…
+while __bettercd_q_canpop; do _bcd_ml_query="${_bcd_ml_query%?}"; __bettercd_qback; done
+[ "$_bcd_ml_query" = "bett" ] && [ "$_bcd_ml_n" = "$qn_q0" ] && [ "$_bcd_ml_list" = "$ql_q0" ]
+check "star: qback pops to the q0 floor, exactly (list + count restored)" $?
+# …and the floor holds: further backspaces are refused, the query never shrinks
+__bettercd_q_canpop; [ $? -ne 0 ] && [ "$_bcd_ml_query" = "bett" ]
+check "star: the floor holds — q0 is never chewed into" $?
+_bcd_ml_q0=""; _bcd_ml_query=""; _bcd_ml_full=0
+cd "$TMP"
+
+# 34e. STREAM stage order: current tree BEFORE the $HOME sweep (the ranking ask)
+mkdir -p "$TMP/tree/deep/starstage" "$HOME/starstage_home"
+cd "$TMP/tree"
+__bettercd_stream_start starstage
+i=0
+while [ "$i" -lt 60 ]; do
+    grep -q "starstage_home" "$_bcd_ml_streamf" 2>/dev/null && break
+    sleep 0.1; i=$((i + 1))
+done
+tree_ln="$(grep -n "$TMP/tree/deep/starstage" "$_bcd_ml_streamf" 2>/dev/null | head -1 | cut -d: -f1)"
+home_ln="$(grep -n "starstage_home" "$_bcd_ml_streamf" 2>/dev/null | head -1 | cut -d: -f1)"
+[ -n "$tree_ln" ] && [ -n "$home_ln" ] && [ "$tree_ln" -lt "$home_ln" ]
+check "stream: current-tree hits stream in BEFORE the \$HOME sweep" $?
+__bettercd_stream_stop
+[ -z "$_bcd_ml_streamf" ]; check "stream: stop still clears the current-tree job" $?
+cd "$TMP"
+
+# 34f. scripts / non-tty are UNTOUCHED: the star arm never fires, so a starred
+# name keeps today's stock behavior exactly (here: the auto-create path).
+mkdir -p "$TMP/starx"; cd "$TMP/starx"
+cd 'zz*' 2>/dev/null </dev/null
+[ "$PWD" = "$TMP/starx/zz*" ] && [ -d "$TMP/starx/zz*" ]
+check "star: non-interactive keeps stock behavior (no menu, no routing change)" $?
+bettercd undo 2>/dev/null
+cd "$TMP"; rm -rf "$TMP/starx"
+
+# 34g. the star STASH is single-use and never hijacks an ordinary cd: it is
+# consumed on the first cd of that line, and on a non-tty it changes nothing.
+mkdir -p "$TMP/stash_target"
+_BETTERCD_STAR_Q="zz"
+cd "$TMP/stash_target" 2>/dev/null </dev/null
+[ "$PWD" = "$TMP/stash_target" ] && [ -z "$_BETTERCD_STAR_Q" ]
+check "star: stash is consumed once and never hijacks a non-tty cd" $?
+cd "$TMP"
+
+# 35. S4 — the unvisited-dir jump (tier resolver; the cd() arm is tty-only) -----
+cd "$TMP"
+mkdir -p "$TMP/jt/shallow/target" "$TMP/jt/one/two/three/target" \
+         "$TMP/jt/node_modules/target" "$TMP/jt/.git/target" \
+         "$TMP/jt/pfx/tgx" "$TMP/jt/con/xxtgxx" "$TMP/jt/deep/a/b/c/d/e/toodeep"
+cd "$TMP/jt"
+
+# 35a. exact tier: the shallowest exact basename wins
+__bettercd_jump_scan "$PWD" target cwd && __bettercd_jump_classify target
+[ "$_bcd_jp" = "$TMP/jt/shallow/target" ]; check "jump: exact tier picks the shallowest hit" $?
+
+# 35b. prunes: node_modules/ and .git/ are never candidates (both are SHALLOWER
+# than the real hit, so a broken prune would lose this test loudly)
+case "$_bcd_jp" in *node_modules*|*.git*) bad "jump: prunes respected" ;; *) ok ;; esac
+
+# 35c. tier precedence: exact beats prefix beats contains
+__bettercd_jump_resolve target
+[ "$_bcd_jp" = "$TMP/jt/shallow/target" ]; check "jump: resolve prefers an exact match" $?
+__bettercd_jump_resolve tg
+[ "$_bcd_jp" = "$TMP/jt/pfx/tgx" ]; check "jump: prefix beats contains (tier order wins over depth)" $?
+__bettercd_jump_resolve xtgx
+[ "$_bcd_jp" = "$TMP/jt/con/xxtgxx" ]; check "jump: contains tier catches a substring" $?
+
+# 35c2. ONE scan per root (the 38s-miss regression): the resolver must never
+# fan out a find per tier — the tiers are decided in-shell over one candidate set.
+grep -q 'jump_scan "\$PWD" "\$1" cwd && __bettercd_jump_classify' "$BETTERCD_SH"
+check "jump: a single bounded scan per root (no find-per-tier)" $?
+
+# 35d. maxdepth 5 bounds the scan (a dir below it is not reachable)
+__bettercd_jump_resolve toodeep; rc=$?
+[ $rc -ne 0 ]; check "jump: maxdepth bounds the search (deeper than 5 = miss)" $?
+
+# 35e. a total miss returns rc1 (so the create-flow continues, unchanged)
+__bettercd_jump_resolve zzz-nothing-like-this; [ $? -ne 0 ]
+check "jump: a genuine miss falls through (rc1)" $?
+
+# 35f. $HOME fallback: found from a cwd that has no hit, but only when the query
+# carries enough signal (>= 3 chars)
+mkdir -p "$HOME/homeonly-proj" "$TMP/jt/empty"
+cd "$TMP/jt/empty"
+__bettercd_jump_resolve homeonly-proj
+[ "$_bcd_jp" = "$HOME/homeonly-proj" ]; check "jump: \$HOME fallback resolves an unvisited dir" $?
+__bettercd_jump_resolve ho; [ $? -ne 0 ]
+check "jump: \$HOME fallback needs >= 3 chars" $?
+cd "$TMP/jt"
+
+# 35g. eligibility: bare relative names only — a slash means the user knows the
+# layout, and flags/dashes/absolutes are somebody else's arm
+__bettercd_jump_eligible apiv2;      check "jump-eligible: a bare name" $?
+__bettercd_jump_eligible src/apiv2;  [ $? -ne 0 ]; check "jump-eligible: a slash path is NOT searched" $?
+__bettercd_jump_eligible /abs;       [ $? -ne 0 ]; check "jump-eligible: an absolute path is NOT searched" $?
+__bettercd_jump_eligible -P;         [ $? -ne 0 ]; check "jump-eligible: a flag is NOT searched" $?
+__bettercd_jump_eligible ..;         [ $? -ne 0 ]; check "jump-eligible: .. is NOT searched" $?
+BETTERCD_JUMP=0
+__bettercd_jump_eligible apiv2;      [ $? -ne 0 ]; check "jump-eligible: BETTERCD_JUMP=0 disables" $?
+unset BETTERCD_JUMP
+
+# 35h. SCRIPTS ARE UNTOUCHED: non-interactive `cd target` still auto-creates
+# ./target under cwd exactly as before — no jump, no routing change.
+cd "$TMP/jt"
+cd target 2>/dev/null </dev/null
+[ "$PWD" = "$TMP/jt/target" ] && [ -d "$TMP/jt/target" ]
+check "jump: non-interactive keeps the stock create-flow (no jump)" $?
+bettercd undo 2>/dev/null
+cd "$TMP"; rm -rf "$TMP/jt" "$HOME/homeonly-proj"
 
 # --- results -----------------------------------------------------------------
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-suite}" "$PASS" "$FAIL"
