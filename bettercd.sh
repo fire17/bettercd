@@ -867,10 +867,28 @@ __BCD_EOF__
     else printf clean; fi
 }
 
+# Which stat dialect this box speaks, decided once. Exit status can't decide it:
+# GNU's `-f` means "stat the FILESYSTEM" and happily succeeds on a BSD-shaped
+# call, so probe by the SHAPE of the output (a real YYYY-MM-DD) instead.
+__bettercd_statflavor() {
+    [ -n "${_BETTERCD_STATF-}" ] && return 0
+    case "$(command stat -f '%Sm' -t '%Y-%m-%d' "$HOME" 2>/dev/null)" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) _BETTERCD_STATF=bsd; return 0 ;;
+    esac
+    case "$(command stat -c '%y' "$HOME" 2>/dev/null)" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*) _BETTERCD_STATF=gnu; return 0 ;;
+    esac
+    _BETTERCD_STATF=none
+}
+
 # F5 mtime (portable BSD/GNU): YYYY-MM-DD of the dir, '-' if unreadable.
 __bettercd_rowmtime() { # $1 dir
-    _bcd_mt="$(command stat -f '%Sm' -t '%Y-%m-%d' "$1" 2>/dev/null)"
-    [ -n "$_bcd_mt" ] || _bcd_mt="$(command stat -c '%y' "$1" 2>/dev/null)"
+    __bettercd_statflavor
+    case "$_BETTERCD_STATF" in
+        bsd) _bcd_mt="$(command stat -f '%Sm' -t '%Y-%m-%d' "$1" 2>/dev/null)" ;;
+        gnu) _bcd_mt="$(command stat -c '%y' "$1" 2>/dev/null)" ;;
+        *)   _bcd_mt="" ;;
+    esac
     _bcd_mt="${_bcd_mt%% *}"
     [ -n "$_bcd_mt" ] || _bcd_mt="-"
     printf '%s' "$_bcd_mt"
@@ -976,13 +994,9 @@ __BCD_EOF__
     return 0
 }
 
-# dir birthtime, portable probe decided once: BSD stat -f %SB, GNU stat -c %w
+# dir birthtime: BSD stat -f %SB, GNU stat -c %w (GNU often has none → "-")
 __bettercd_created() { # $1 dir → sets _bcd_crt (YYYY-MM-DD or "-")
-    if [ -z "${_BETTERCD_STATF-}" ]; then
-        if command stat -f '%SB' -t '%Y-%m-%d' "$HOME" >/dev/null 2>&1; then _BETTERCD_STATF=bsd
-        elif command stat -c '%w' "$HOME" >/dev/null 2>&1; then _BETTERCD_STATF=gnu
-        else _BETTERCD_STATF=none; fi
-    fi
+    __bettercd_statflavor
     case "$_BETTERCD_STATF" in
         bsd) _bcd_crt="$(command stat -f '%SB' -t '%Y-%m-%d' "$1" 2>/dev/null)" ;;
         gnu) _bcd_crt="$(command stat -c '%w' "$1" 2>/dev/null)"; _bcd_crt="${_bcd_crt%% *}" ;;
@@ -1437,6 +1451,7 @@ __bettercd_menu_stageB() {
     done <<__BCD_EOF__
 ${_bcd_ml_qsrc-}
 __BCD_EOF__
+    _bcd_ml_sel=${_bcd_ml_sel:-0}; _bcd_ml_off=${_bcd_ml_off:-0}
     [ "$_bcd_ml_sel" -ge "$_bcd_ml_n" ] && _bcd_ml_sel=$(( _bcd_ml_n - 1 ))
     [ "$_bcd_ml_sel" -lt 0 ] && _bcd_ml_sel=0
     __bettercd_menu_geom
@@ -1469,6 +1484,7 @@ __BCD_EOF__
     else
         _bcd_ml_lines=$(( _bcd_ml_vis + 5 )); _bcd_ml_rowoff=2
     fi
+    _bcd_ml_sel=${_bcd_ml_sel:-0}; _bcd_ml_off=${_bcd_ml_off:-0}; _bcd_ml_n=${_bcd_ml_n:-0}
     [ "$_bcd_ml_off" -gt $(( _bcd_ml_n - _bcd_ml_vis )) ] && _bcd_ml_off=$(( _bcd_ml_n - _bcd_ml_vis ))
     [ "$_bcd_ml_off" -lt 0 ] && _bcd_ml_off=0
     [ "$_bcd_ml_sel" -lt "$_bcd_ml_off" ] && _bcd_ml_off="$_bcd_ml_sel"
