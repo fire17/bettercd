@@ -2783,6 +2783,29 @@ __bettercd_jump_eligible() { # $1 arg → rc0 if searchable
     return 0
 }
 
+# type-a-name magic: does a bare typed word (`proj`, or `proj/src`) point at a
+# real dir only ZOXIDE knows? Prints the existing target dir (rc0) or nothing
+# (rc1). Hands OFF anything that is a command/alias/builtin/function, already a
+# path (AUTO_CD owns those), or not plain-path-ish — so a mistyped command never
+# becomes a create. Plain function (command -v, not whence) so the suite can
+# unit-test the safety predicate headless, under sh/bash/zsh alike.
+__bettercd_typejump() { # $1 token → prints abs dir
+    [ "${BETTERCD_MAGIC_TYPE:-1}" != 0 ] || return 1
+    command -v zoxide >/dev/null 2>&1 || return 1
+    case "$1" in
+        ''|*[!A-Za-z0-9._/@+-]*) return 1 ;;   # only plain path-ish tokens
+    esac
+    [ -e "$1" ] && return 1                     # real path → AUTO_CD/normal owns it
+    _tj_h="${1%%/*}"; _tj_r=""
+    case "$1" in */*) _tj_r="${1#*/}" ;; esac
+    command -v -- "$_tj_h" >/dev/null 2>&1 && return 1   # a real command → hands off
+    _tj_z="$(command zoxide query -- "$_tj_h" 2>/dev/null)" || return 1
+    [ -n "$_tj_z" ] || return 1
+    _tj_tgt="$_tj_z"; [ -n "$_tj_r" ] && _tj_tgt="$_tj_z/$_tj_r"
+    [ -d "$_tj_tgt" ] || return 1
+    printf '%s\n' "$_tj_tgt"
+}
+
 # --- the cd wrapper ----------------------------------------------------------
 cd() {
     # zero-fork freshness check; on reload, re-dispatch into the NEW cd
@@ -3117,6 +3140,47 @@ fi
 # W1'' measured park column: at Enter-time (zle-line-finish, AFTER any prior
 # widget — e.g. p10k transient prompt — so we measure the FINAL rendered line)
 # capture the exact cursor cell right after the typed command via one CPR.
+# --- type-a-dir-name magic -----------------------------------------------------
+# Type `test2` (a dir in your cwd, or nested `test2/deep`) and land there with no
+# `cd`. This is the shell's own AUTO_CD — nothing to build, and it uses the
+# builtin cd, so an existing dir is just a plain jump (recents still tracked by
+# the precmd). Interactive shells only; BETTERCD_AUTOCD=0 opts out.
+if [ "${BETTERCD_AUTOCD-1}" != 0 ]; then
+    if [ -n "${ZSH_VERSION-}" ]; then
+        case $- in *i*) setopt autocd 2>/dev/null ;; esac
+    elif [ -n "${BASH_VERSION-}" ]; then
+        case $- in *i*) shopt -s autocd 2>/dev/null ;; esac
+    fi
+fi
+
+# AUTO_CD only sees real paths under the cwd. This zsh widget extends the same
+# magic to names only ZOXIDE knows: on Enter, a lone bare word that is NOT a
+# command/alias/builtin/function AND does not exist as a path, but frecency-
+# resolves to a real dir (bare `proj`, or nested `proj/src`), is rewritten to
+# `cd -- <that dir>` so bettercd jumps there. It resolves to an EXISTING dir
+# first, so a mistyped command never turns into a surprise create. Falls through
+# to whatever accept-line was bound before us (p10k, syntax-highlighting, …),
+# so it must load last — which it does, from the end of your rc. zsh only;
+# BETTERCD_MAGIC_TYPE=0 opts out. (This block lives inside eval "…" — no '.)
+if [ -n "${ZSH_VERSION-}" ] && command -v zoxide >/dev/null 2>&1; then
+    eval '
+    # capture whatever accept-line is NOW under a private name, then take over —
+    # our handler delegates to it, so any earlier wrapper still runs. The guard
+    # keeps a re-source (autoreload) from aliasing ourselves into a loop.
+    if [[ ${widgets[accept-line]} != user:__bettercd_accept_line ]]; then
+        zle -A accept-line __bettercd_orig_accept_line 2>/dev/null
+    fi
+    __bettercd_accept_line() {
+        emulate -L zsh
+        local _tgt
+        _tgt=$(__bettercd_typejump "$BUFFER") && [[ -n $_tgt ]] && \
+            BUFFER="cd -- ${(q)_tgt}"
+        zle __bettercd_orig_accept_line
+    }
+    zle -N accept-line __bettercd_accept_line 2>/dev/null
+    '
+fi
+
 # Gated to `cd -*` buffers: zero cost for every other command. zsh only.
 if [ -n "${ZSH_VERSION-}" ]; then
     eval '

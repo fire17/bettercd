@@ -58,6 +58,7 @@ flowchart LR
 
 ## What it does
 
+- **Type a directory name — skip the `cd` entirely.** `test2` when `./test2` exists (even the nested `test2/deep`) takes you there. That's the shell's own `AUTO_CD`, switched on for interactive zsh **and** bash — native, zero overhead. On zsh it reaches further: a bare word (or `name/sub`) that is *not* a command/alias/builtin and frecency-resolves through zoxide is rewritten to `cd -- <that dir>` before it runs — it resolves to an **existing** dir first, so a mistyped command never becomes a surprise create, and the widget chains to whatever `accept-line` was bound before it (p10k, syntax-highlighting). Off-switches: `BETTERCD_AUTOCD=0`, `BETTERCD_MAGIC_TYPE=0`.
 - **`cd` into a directory that doesn't exist, under your cwd → it's created** (`mkdir -p`) and you're in it — announced by a one-liner whose leading `+` **sparkles through unicode glyphs for ~2s** (Claude-Code-style), *after* your prompt is already back. Fully non-blocking: a detached animator redraws just that one cell (cursor save/restore around an absolute-row anchor) and prompt hooks kill it the instant anything would scroll. Scripts and non-tty shells get the plain static message instead.
 - **`cd -` twice → a sparkling dropdown of recent places.** Tap `cd -` a second time (or hit it ≥2× within a minute) and a `✻` menu of where you've been drops in — arrows / `j` `k` / digits to move, `⏎` to jump, `esc` to cancel. **Plain Enter picks `$OLDPWD`, so it stays *exactly* `cd -`.** `cd --` opens it directly. Non-interactive shells and `BETTERCD_MAGIC=0` keep the plain classic toggle, untouched. Tune the arm window with `bettercd magic window <min>`.
 - **`undo-cd`** (or `bettercd undo`) — go back where you were and remove *exactly* the directories that were created (uses `rmdir` only: anything that gained content is kept, never deleted).
@@ -133,7 +134,7 @@ Auto-creating directories on `cd` is a footgun if done naively. The rules that k
 | Undo + zoxide | the created dir is also removed from the zoxide database |
 | Your old `cd` | detected at load (zoxide / custom function / builtin) and delegated to — never clobbered |
 
-Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_JUMP=0` (no unvisited-dir search), `BETTERCD_QUIET=1` (no hints), `BETTERCD_TYPO_GUARD=0` (no did-you-mean), `BETTERCD_SPARKLE=0` (no animation), `BETTERCD_MAGIC=0` (no `cd -` dropdown), `builtin cd` / `command cd` (bypass entirely).
+Escape hatches: `BETTERCD_AUTO_CREATE=0` (disable creation), `BETTERCD_AUTOCD=0` (no type-a-name cd), `BETTERCD_MAGIC_TYPE=0` (no zoxide-name rewrite), `BETTERCD_JUMP=0` (no unvisited-dir search), `BETTERCD_QUIET=1` (no hints), `BETTERCD_TYPO_GUARD=0` (no did-you-mean), `BETTERCD_SPARKLE=0` (no animation), `BETTERCD_MAGIC=0` (no `cd -` dropdown), `builtin cd` / `command cd` (bypass entirely).
 
 ## Performance
 
@@ -165,6 +166,8 @@ bettercd places       list the recent-places pool (-n <k> limits)
 cdi <query>           interactive fuzzy cd (zoxide + fzf)
 
 BETTERCD_AUTO_CREATE=0    disable auto-create
+BETTERCD_AUTOCD=0         don't enable AUTO_CD (type a dir name to cd into it)
+BETTERCD_MAGIC_TYPE=0     don't rewrite a bare zoxide name into cd -- (zsh)
 BETTERCD_QUIET=1          suppress hints
 BETTERCD_TYPO_GUARD=0     disable the did-you-mean typo guard
 BETTERCD_SPARKLE=0        disable the animated create line

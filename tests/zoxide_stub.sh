@@ -55,6 +55,36 @@ bettercd undo 2>/dev/null
 # 4. existing dir still passes through the zoxide delegate
 mkdir plain && cd plain
 [ "$PWD" = "$TMP/plain" ]; check "existing dir passthrough in zoxide mode" $?
+cd "$TMP"
+
+# 5. type-a-name safety predicate (__bettercd_typejump) — drives the accept-line
+#    widget. Shadow the real zoxide binary with a stub so this is deterministic.
+mkdir -p "$TMP/bin" "$TMP/tjroot/tjname" "$TMP/tjroot/tjnest/sub"
+cat > "$TMP/bin/zoxide" <<EOF
+#!/bin/sh
+[ "\$1" = query ] || exit 0; shift
+[ "\$1" = -- ] && shift
+case "\$1" in tjname) echo "$TMP/tjroot/tjname" ;; tjnest) echo "$TMP/tjroot/tjnest" ;; esac
+exit 0
+EOF
+chmod +x "$TMP/bin/zoxide"
+PATH="$TMP/bin:$PATH"; export PATH
+
+[ "$(__bettercd_typejump tjname)" = "$TMP/tjroot/tjname" ]
+check "typejump: bare zoxide name resolves" $?
+[ "$(__bettercd_typejump tjnest/sub)" = "$TMP/tjroot/tjnest/sub" ]
+check "typejump: nested zoxide name/sub resolves" $?
+[ -z "$(__bettercd_typejump ls)" ]
+check "typejump: real command is left alone" $?
+mkdir -p "$TMP/realdir"; [ -z "$(__bettercd_typejump realdir)" ]
+check "typejump: existing path is left to AUTO_CD" $?
+[ -z "$(__bettercd_typejump tjNOPE)" ]
+check "typejump: unknown non-command does not resolve" $?
+[ -z "$(__bettercd_typejump 'a b')" ] && [ -z "$(__bettercd_typejump 'x|y')" ]
+check "typejump: tokens with spaces/operators rejected" $?
+[ -z "$(BETTERCD_MAGIC_TYPE=0 __bettercd_typejump tjname)" ]
+check "typejump: BETTERCD_MAGIC_TYPE=0 opts out" $?
+cd "$TMP"
 
 printf '%s: %d passed, %d failed\n' "${BETTERCD_TEST_LABEL:-zoxide-stub}" "$PASS" "$FAIL"
 cd / && rm -rf "$TMP"

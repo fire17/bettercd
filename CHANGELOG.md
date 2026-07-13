@@ -2,6 +2,22 @@
 
 ## Unreleased (v0.12.0)
 
+- **Type a directory name — no `cd` needed.** `test2` when `./test2` exists (or
+  the nested `test2/deep`) drops you straight in. This is the shell's own
+  `AUTO_CD`, enabled for interactive zsh **and** bash — native, zero overhead,
+  and it uses the builtin `cd`, so an existing dir is just a plain jump. Opt out
+  with `BETTERCD_AUTOCD=0`.
+  - **Extends to names only zoxide knows (zsh).** `AUTO_CD` sees only real paths
+    under the cwd; a zsh accept-line widget covers the rest: a lone bare word (or
+    `name/subpath`) that is **not** a command/alias/builtin/function, is not
+    already a path, and frecency-resolves to a real directory is rewritten to
+    `cd -- <that dir>` before it runs. It resolves to an **existing** directory
+    first, so a mistyped command is never turned into a surprise create — it
+    falls through to your normal not-found handling untouched. The widget chains
+    to whatever `accept-line` was bound before it (p10k, syntax-highlighting, …),
+    so load bettercd last (the rc block already does). Opt out with
+    `BETTERCD_MAGIC_TYPE=0`. zsh only — bash keeps `AUTO_CD` for the cwd cases.
+
 - **Outside-cwd creates are one step, not two.** The old flow failed once with a
   hint (`repeat to create it`) and only asked `[y/N]` if you retyped the exact
   same command. Now a single line states the miss *and* asks in the same breath —
